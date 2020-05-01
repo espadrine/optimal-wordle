@@ -168,7 +168,6 @@ function update_exponential_params!(aggregate::ConvergingMeasurement)
     return  # We need at least 3 points.
   end
   differentials = aggregate.differentials
-  differentials.exp_visits += 1
 
   # yi = a + bc^i
   # => c = (y'i ÷ y'0)^(1/i))
@@ -185,10 +184,8 @@ function update_exponential_params!(aggregate::ConvergingMeasurement)
   if new_exp_base <= 0.0 || new_exp_base >= 1.0
     return  # Discard diverging data.
   end
+  differentials.exp_visits += 1
   differentials.exp_base = (differentials.exp_base * (differentials.exp_visits-1) + new_exp_base) / differentials.exp_visits
-  if differentials.exp_base <= 0.0 || differentials.exp_base >= 1.0
-    return  # Discard diverging data.
-  end
 
   # => b = y'1 ÷ (c×log(c))
   new_exp_coeff = differentials.init_slope / (differentials.exp_base * log(differentials.exp_base))
@@ -228,7 +225,7 @@ end
 
 function estimate_asymptote(aggregate::ConvergingMeasurement)::Float64
   differentials = aggregate.differentials
-  if differentials.exp_visits < 1
+  if differentials.exp_base <= 0
     # We have no exponential base, and the current slope does not learn from
     # other choices. So we use the init_slope.
     # Lacking second derivatives, we assume that the slope halves after every
@@ -244,7 +241,7 @@ function estimate_asymptote(aggregate::ConvergingMeasurement)::Float64
   # If the base is above 1, the asymptote is at -∞ visits.
   # The exponential regression diverges: to compare different choices,
   # we look at the extrapolated value at the latest global visit count.
-  if differentials.exp_base > 1
+  if differentials.exp_base >= 1
     return a + differentials.exp_coeff*differentials.exp_base^differentials.max_visits
   end
   return a
@@ -290,6 +287,8 @@ mutable struct Choice
   optimal_estimate::Float64
   optimal_estimate_variance::Float64
 
+  # The following probabilities are local estimations;
+  # they must be divided by sum_prob_optimal etc. to be coherent.
   prob_optimal::Float64
   prob_improvement::Float64
   prob_beat_best::Float64  # Probability that it can beat the best choice.
@@ -793,7 +792,8 @@ function prob_improvement(choice::Choice)::Float64
     max_children = maximum(t -> if isnothing(t)
       1
     else
-      maximum(c -> c.prob_improvement, t.choices)
+      #t.best_choice.prob_improvement
+      foldl((p, c) -> p + c.prob_improvement * c.prob_optimal, t.choices, init=0)  / t.sum_prob_optimal
     end, choice.constraints)
     return min(max_children, historic_improvement)
   end
