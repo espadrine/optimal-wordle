@@ -16,8 +16,11 @@ fn rank_guesses(guesses: &Vec<&str>, solutions: &Vec<&str>) -> Vec<Choice> {
     let guesses_worker = guesses.iter().map(|w| w.to_string()).collect::<Vec<String>>();
     let solutions_worker = solutions.iter().map(|w| w.to_string()).collect::<Vec<String>>();
     let workers: thread::JoinHandle<Vec<Choice>> = thread::spawn(move ||
-        guesses_worker.par_iter().map(|guess| {
-            let choice = Choice { word: guess.to_string(), avg_remaining: choice::avg_remaining(guess, &solutions_worker) };
+        guesses_worker.into_par_iter().map(|guess| {
+            let choice = Choice {
+                word: guess.clone(),
+                avg_remaining: choice::avg_remaining(guess.as_str(), &solutions_worker.iter().map(|w| w.as_str()).collect())
+            };
             let mut counter = computed_guesses_worker.lock().unwrap();
             *counter += 1;
             return choice;

@@ -1,6 +1,6 @@
 use crate::wordle;
 
-pub fn remaining(guess: &str, solution: &str, solutions: &Vec<String>) -> f64 {
+pub fn remaining(guess: &str, solution: &str, solutions: &Vec<&str>) -> f64 {
     let constraints = wordle::constraints(guess, solution);
     let mut remaining = 0.0;
     for potential_solution in solutions {
@@ -11,7 +11,7 @@ pub fn remaining(guess: &str, solution: &str, solutions: &Vec<String>) -> f64 {
     return remaining;
 }
 
-pub fn avg_remaining(guess: &str, solutions: &Vec<String>) -> f64 {
+pub fn avg_remaining(guess: &str, solutions: &Vec<&str>) -> f64 {
     let mut remaining_sols = 0.0;
     for solution in solutions {
         remaining_sols += remaining(guess, solution, &solutions);
