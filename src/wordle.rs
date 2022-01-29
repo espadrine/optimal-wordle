@@ -1,3 +1,4 @@
+#[derive(PartialEq)]
 pub enum ConstraintClass { Absent, Misplaced, Correct }
 
 pub struct Constraint {
@@ -23,11 +24,16 @@ pub fn constraints(guess: &str, solution: &str) -> Vec<Constraint> {
 pub fn parse_constraints(template: &str, guess: &str) -> Vec<Constraint> {
     let mut constraints = Vec::new();
     for (i, (tc, gc)) in template.chars().zip(guess.chars()).enumerate() {
-        constraints.push(match tc {
-            'o' => Constraint { letter: gc, index: i, class: ConstraintClass::Correct },
-            'x' => Constraint { letter: gc, index: i, class: ConstraintClass::Misplaced },
-            _   => Constraint { letter: gc, index: i, class: ConstraintClass::Absent },
-        });
+        match tc {
+            'o' => constraints.push(Constraint { letter: gc, index: i, class: ConstraintClass::Correct }),
+            'x' => constraints.push(Constraint { letter: gc, index: i, class: ConstraintClass::Misplaced }),
+            _   => (),
+        }
+    }
+    for (i, (tc, gc)) in template.chars().zip(guess.chars()).enumerate() {
+        if tc == '.' && !constraints.iter().any(|c| c.class != ConstraintClass::Absent && c.letter == gc) {
+            constraints.push(Constraint { letter: gc, index: i, class: ConstraintClass::Absent });
+        }
     }
     return constraints
 }
