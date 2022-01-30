@@ -1,6 +1,7 @@
 mod wordle;
 mod choice;
 use choice::Choice;
+use std::borrow::Cow;
 use std::fs;
 use std::io::{self, Write};
 use std::time::Duration;
@@ -10,7 +11,7 @@ use rayon::prelude::*;
 
 const ANSI_RESET_LINE: &str = "\x1b[1K\x1b[G";
 
-fn rank_guesses(guesses: &Vec<&str>, solutions: &Vec<&str>) -> Vec<Choice> {
+fn rank_guesses<'a>(guesses: &'a Vec<&str>, solutions: &'a Vec<&str>) -> Vec<Choice<'a>> {
     let computed_guesses = Arc::new(Mutex::new(0));
     let computed_guesses_worker = Arc::clone(&computed_guesses);
     let guesses_worker = guesses.iter().map(|w| w.to_string()).collect::<Vec<String>>();
@@ -18,7 +19,7 @@ fn rank_guesses(guesses: &Vec<&str>, solutions: &Vec<&str>) -> Vec<Choice> {
     let workers: thread::JoinHandle<Vec<Choice>> = thread::spawn(move ||
         guesses_worker.into_par_iter().map(|guess| {
             let choice = Choice {
-                word: guess.clone(),
+                word: Cow::Owned(guess.clone()),
                 avg_remaining: choice::avg_remaining(guess.as_str(), &solutions_worker.iter().map(|w| w.as_str()).collect())
             };
             let mut counter = computed_guesses_worker.lock().unwrap();
@@ -64,7 +65,7 @@ fn main() {
     let mut remaining_solutions = solutions.clone();
     while remaining_solutions.len() > 1 {
         let suggestions = if remaining_solutions.len() == solutions.len() {
-            choice::root_choices()
+            choice::ROOT_CHOICES.to_vec()
         } else {
             rank_guesses(&allowed_guesses, &remaining_solutions)
         };
