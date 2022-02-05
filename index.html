@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Wordle solver</title>
+  </head>
+  <body>
+    <section id="logParagraph"></section>
+    <form action="javascript:void 0">
+      <p><label> Guess: <input id="guessInput" placeholder="salet"></label></p>
+      <p><label> Constraint: <input id="constraintInput" placeholder="ox..."></label></p>
+      <button id="guessButton">Guess</button>
+      <button id="restartButton">Restart</button>
+      <span id="computingParagraph">Computing…</span>
+    </form>
+    <p> The constraint should be 5 characters: o = letter at right spot, x = wrong spot, . = not in the word.</p>
+    <script src="./main.js"></script>
+  </body>
+</html>

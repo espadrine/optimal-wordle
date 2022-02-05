@@ -84,6 +84,7 @@ fn main() {
         let constraints = wordle::parse_constraints(&constraint_template, &guess);
         remaining_solutions = remaining_solutions.into_iter().filter(|sol|
             wordle::match_constraints(sol, &constraints)).collect();
+        println!("{} solutions are left.", remaining_solutions.len());
     }
 
     println!("Solution: {}.", remaining_solutions[0]);
