@@ -13,20 +13,27 @@ function main()
     #  println(i, ". ", g.guess, " (keeps ", g.avg_remaining, " words on average)")
     #end
 
-    for guess in allowed_guesses
+    for i in 1:1000
       improve!(tree, remaining_solutions, allowed_guesses)
 
       # Print best guesses so far.
+      sort!(tree.choices, by = c -> c.guesses_remaining)
       choice = first(tree.choices)
       println("We suggest ", choice.guess, " (keeps ", choice.avg_remaining, " words on average; ",
               "solves in ", choice.guesses_remaining, " guesses.)")
+
+      # Check the average number of guesses
+      println("Total guesses: ", total_guesses_for_all_sols(tree, allowed_guesses, remaining_solutions))
     end
 
     println("Insert your guess: ")
     guess = readline(stdin)
     println("Insert the results (o = letter at right spot, x = wrong spot, . = not in the word): ")
     constraint_template = readline(stdin)
-    remaining_solutions = filter_solutions_by_constraint(remaining_solutions, guess, parse_constraints(constraint_template))
+    constraint = parse_constraints(constraint_template)
+    # TODO: build subtree when it does not exist.
+    tree = tree.choices[findfirst(c -> c.guess == guess, tree.choices)].constraints[constraint + 1]
+    remaining_solutions = filter_solutions_by_constraint(remaining_solutions, guess, constraint)
     println("Remaining words: ", join(remaining_solutions, ", "))
   end
   println("Solution: ", join(remaining_solutions[1]), ".")
@@ -70,15 +77,10 @@ function newTree(guesses::Vector{String}, solutions::Vector{String})::Tree
       @inbounds counts[constraints(guess, solution) + 1] += 1
     end
     avg_rem = sum(abs2, counts) / nsols
-    if avg_rem <= 1 && guess in solutions
-      guesses_left = (1 + 2 * (nsols-1)) / nsols
-      @inbounds choices[i] = Choice(guess, avg_rem, guesses_left, guesses_left, 1, nothing)
-    else
-      @inbounds choices[i] = Choice(guess, avg_rem, Inf, Inf, 0, nothing)
-    end
+    @inbounds choices[i] = Choice(guess, avg_rem, nsols, nsols, 1, nothing)
   end
   for (i, choice) in enumerate(choices)
-    choice.guesses_remaining_low = lower_bound_guesses_remaining(choice, nsols)
+    choice.guesses_remaining_low = lower_bound_guesses_remaining(choice, solutions)
     exploratory_choices[i] = choice
   end
   sort!(choices, by = c -> c.avg_remaining)
@@ -102,6 +104,7 @@ function improve!(tree::Tree, solutions::Vector{String}, guesses::Vector{String}
   # Select the next choice based on the optimal-converging policy
   # (choices have already been sorted according to it).
   choice = first(tree.exploratory_choices)
+  #println("Improve choice ", choice.guess, " with low ", choice.guesses_remaining_low)
   guesses_to_win = 0  # Number of guesses to win with current, converging, policy.
 
   for constraint in UInt8(0):UInt8(242)
@@ -141,8 +144,8 @@ function improve!(tree::Tree, solutions::Vector{String}, guesses::Vector{String}
   # For exploration, we rely on a combined metric that estimates the lower bound
   # of the number of guesses left before winning, based on our uncertainty.
   choice.visits += 1
-  choice.guesses_remaining_low = lower_bound_guesses_remaining(choice, nsolutions)
-  sort!(tree.choices, by = c -> c.guesses_remaining)
+  choice.guesses_remaining_low = lower_bound_guesses_remaining(choice, solutions)
+  #sort!(tree.choices, by = c -> c.guesses_remaining)
   sort!(tree.exploratory_choices, by = c -> c.guesses_remaining_low)
   if nsolutions == 2315
     println("Improving from ", nsolutions, " solutions, was recommending ", choice.guess, " (", @sprintf("%.5f", choice.guesses_remaining), "/", @sprintf("%.5f", choice.guesses_remaining_low), "/", @sprintf("%.5f", choice.avg_remaining), "; visits ", choice.visits, "), now recommending ", tree.choices[1].guess, " (", @sprintf("%.5f", tree.choices[1].guesses_remaining), "/", @sprintf("%.5f", tree.choices[1].guesses_remaining_low), "/", @sprintf("%.5f", tree.choices[1].avg_remaining), ")")
@@ -150,23 +153,28 @@ function improve!(tree::Tree, solutions::Vector{String}, guesses::Vector{String}
   return choice.guesses_remaining
 end
 
-function lower_bound_guesses_remaining(choice::Choice, nsols::Int)
-  policy_estimate = if choice.guesses_remaining != Inf
-    choice.guesses_remaining * choice.visits
+function lower_bound_guesses_remaining(choice::Choice, solutions::Vector{String})
+  nsols = length(solutions)
+  policy_estimate = if choice.visits > 1
+    choice.guesses_remaining
   else
-    0
+    prob_sol = if choice.guess in solutions
+      1 / nsols
+    else
+      0
+    end
+    # To estimate the number of remaining guesses n to win, we assume that we
+    # maintain a constant ratio q of removed solutions after each guess.
+    # We have s solutions currently, such that q^n = s. Thus n = log(s)÷log(q).
+    1 + (prob_sol * 0 + (1-prob_sol) * log(nsols) / log(nsols / choice.avg_remaining))
   end
-  # To estimate the number of remaining guesses n to win, we assume that we
-  # maintain a constant ratio q of removed solutions after each guess.
-  # We have s solutions currently, such that q^n = s. Thus n = log(s)÷log(q).
-  est_guesses_rem_from_avg_rem = log(nsols) / log(nsols / choice.avg_remaining)
   # We compute the weighed average of `visits + 2` measurements:
   # - an optimistic future exploration that would find the solution in 1 guess
-  #   (for lower bound uncertainty),
-  # - the estimate from the average number of solution remaining
+  #   on top of the guess for this choice (for lower bound uncertainty),
+  # - and either the accurate results of previous visits using the optimal policy.
+  # - or the estimate from the average number of solution remaining
   #   (for when we have no accurate result),
-  # - and the accurate results of previous visits using the optimal policy.
-  return (1 + est_guesses_rem_from_avg_rem + policy_estimate) / (choice.visits + 2)
+  return (max(2, policy_estimate - 1) + policy_estimate * choice.visits) / (choice.visits + 1)
 end
 
 function rank_guesses(guesses::Array{String}, words::Array{String})::Array{Choice}
@@ -237,6 +245,41 @@ function match_constraints(word::String, guess::String, constraints::UInt8)::Boo
     constraints ÷= 3
   end
   return true
+end
+
+function total_guesses_for_all_sols(tree::Tree, guesses::Vector{String}, solutions::Vector{String})::Int
+  nguesses = 0
+  for solution in solutions
+    nguesses += total_guesses_for_sol(tree, solution, guesses, solutions)
+  end
+  nguesses
+end
+
+function total_guesses_for_sol(tree::Tree, solution::String, guesses::Vector{String}, solutions::Vector{String})::Int
+  if length(solutions) == 1
+    return 1
+  end
+  sort!(tree.choices, by = c -> c.guesses_remaining)
+  choice = tree.choices[1]
+  if choice.avg_remaining == 1
+    for c in tree.choices
+      if c.guess in solutions && c.avg_remaining == 1
+        choice = c
+      end
+    end
+  end
+  if choice.constraints == nothing
+    choice.constraints = Vector{Union{Tree, Nothing}}(nothing, 243)
+  end
+  c = constraints(choice.guess, solution)
+  if c == 0xf2
+    return 1
+  end
+  if choice.constraints[c + 1] == nothing
+      choice.constraints[c + 1] = newTree(guesses, solutions)
+  end
+  remaining_solutions = filter_solutions_by_constraint(solutions, choice.guess, c)
+  return 1 + total_guesses_for_sol(choice.constraints[c + 1], solution, guesses, remaining_solutions)
 end
 
 main()
