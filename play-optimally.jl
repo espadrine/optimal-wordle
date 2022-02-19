@@ -19,11 +19,14 @@ function main()
       # Print best guesses so far.
       sort!(tree.choices, by = c -> c.guesses_remaining)
       choice = first(tree.choices)
-      println("We suggest ", choice.guess, " (keeps ", choice.avg_remaining, " words on average; ",
-              "solves in ", choice.guesses_remaining, " guesses.)")
+      println("We suggest ", choice.guess, " (",
+              @sprintf("%.5f", choice.guesses_remaining), "/",
+              @sprintf("%.5f", choice.guesses_remaining_low), "/",
+              @sprintf("%.5f", choice.avg_remaining), "), ",
+              "step ", i)
 
       # Check the average number of guesses
-      println("Total guesses: ", total_guesses_for_all_sols(tree, allowed_guesses, remaining_solutions))
+      #println("Total guesses: ", total_guesses_for_all_sols(tree, allowed_guesses, remaining_solutions))
     end
 
     println("Insert your guess: ")
@@ -83,8 +86,6 @@ function newTree(guesses::Vector{String}, solutions::Vector{String})::Tree
     choice.guesses_remaining_low = lower_bound_guesses_remaining(choice, solutions)
     exploratory_choices[i] = choice
   end
-  sort!(choices, by = c -> c.avg_remaining)
-  sort!(exploratory_choices, by = c -> c.guesses_remaining_low)
   #println("Computed new tree with ", nsols, " solutions. Best guess: ", choices[1].guess, " (", choices[1].avg_remaining, "); best exploratory guess: ", exploratory_choices[1].guess, " (", exploratory_choices[1].guesses_remaining_low, ")")
 
   return Tree(choices[1:100], exploratory_choices[1:100])
@@ -103,7 +104,10 @@ function improve!(tree::Tree, solutions::Vector{String}, guesses::Vector{String}
 
   # Select the next choice based on the optimal-converging policy
   # (choices have already been sorted according to it).
+  sort!(tree.exploratory_choices, by = c -> c.guesses_remaining_low)
   choice = first(tree.exploratory_choices)
+  init_guesses_remaining_low = choice.guesses_remaining_low
+  init_guesses_remaining_estimate = 1.12 * (1 + log(nsolutions) / log(nsolutions / choice.avg_remaining))
   #println("Improve choice ", choice.guess, " with low ", choice.guesses_remaining_low)
   guesses_to_win = 0  # Number of guesses to win with current, converging, policy.
 
@@ -145,10 +149,12 @@ function improve!(tree::Tree, solutions::Vector{String}, guesses::Vector{String}
   # of the number of guesses left before winning, based on our uncertainty.
   choice.visits += 1
   choice.guesses_remaining_low = lower_bound_guesses_remaining(choice, solutions)
-  #sort!(tree.choices, by = c -> c.guesses_remaining)
-  sort!(tree.exploratory_choices, by = c -> c.guesses_remaining_low)
   if nsolutions == 2315
-    println("Improving from ", nsolutions, " solutions, was recommending ", choice.guess, " (", @sprintf("%.5f", choice.guesses_remaining), "/", @sprintf("%.5f", choice.guesses_remaining_low), "/", @sprintf("%.5f", choice.avg_remaining), "; visits ", choice.visits, "), now recommending ", tree.choices[1].guess, " (", @sprintf("%.5f", tree.choices[1].guesses_remaining), "/", @sprintf("%.5f", tree.choices[1].guesses_remaining_low), "/", @sprintf("%.5f", tree.choices[1].avg_remaining), ")")
+    println("Improving from ", nsolutions, " solutions, was recommending ", choice.guess, " (",
+            @sprintf("%.5f", choice.guesses_remaining), "←",
+            @sprintf("%.5f", init_guesses_remaining_estimate), "/",
+            @sprintf("%.5f", init_guesses_remaining_low), "/",
+            @sprintf("%.5f", choice.avg_remaining), "; visits ", choice.visits, ")")
   end
   return choice.guesses_remaining
 end
@@ -159,14 +165,16 @@ function lower_bound_guesses_remaining(choice::Choice, solutions::Vector{String}
     choice.guesses_remaining
   else
     prob_sol = if choice.guess in solutions
-      1 / nsols
+      1 / nsols  # If this pick is a winner, there are no more guesses to make.
     else
       0
     end
     # To estimate the number of remaining guesses n to win, we assume that we
     # maintain a constant ratio q of removed solutions after each guess.
-    # We have s solutions currently, such that q^n = s. Thus n = log(s)÷log(q).
-    1 + (prob_sol * 0 + (1-prob_sol) * log(nsols) / log(nsols / choice.avg_remaining))
+    # We have s solutions currently, such that q^(n-1) = s. Thus n = 1 + log(s)÷log(q).
+    # We multiply by 1.12 as that is experimentally the ratio needed to match
+    # the observed number of guesses to a win.
+    1.12 * (1 + (prob_sol * 0 + (1-prob_sol) * (log(nsols) / log(nsols / choice.avg_remaining))))
   end
   # We compute the weighed average of `visits + 2` measurements:
   # - an optimistic future exploration that would find the solution in 1 guess
@@ -174,7 +182,7 @@ function lower_bound_guesses_remaining(choice::Choice, solutions::Vector{String}
   # - and either the accurate results of previous visits using the optimal policy.
   # - or the estimate from the average number of solution remaining
   #   (for when we have no accurate result),
-  return (max(2, policy_estimate - 1) + policy_estimate * choice.visits) / (choice.visits + 1)
+  return (max(2, policy_estimate - 0.4) + policy_estimate * choice.visits) / (choice.visits + 1)
 end
 
 function rank_guesses(guesses::Array{String}, words::Array{String})::Array{Choice}
