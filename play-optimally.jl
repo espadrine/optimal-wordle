@@ -1,20 +1,21 @@
 using Printf
+using Test
 
 const ANSI_RESET_LINE = "\x1b[1K\x1b[G"
 
 function main()
-  words = readlines("solutions")
-  non_solution_words = readlines("non-solution-guesses")
+  words = map(s -> Vector{UInt8}(s), readlines("solutions"))
+  non_solution_words = map(s -> Vector{UInt8}(s), readlines("non-solution-guesses"))
   allowed_guesses = vcat(words, non_solution_words)
 
   remaining_solutions = copy(words)  # List of words that currently fit all known constraints.
   tree = newTree(allowed_guesses, remaining_solutions, nothing)
   while length(remaining_solutions) > 1
-    for i in 1:1000
+    for i in 1:100
       improve!(tree, remaining_solutions, allowed_guesses)
 
       choice = tree.best_choice
-      print(ANSI_RESET_LINE, "We suggest ", choice.guess, " (",
+      print(ANSI_RESET_LINE, "We suggest ", str_from_word(choice.guess), " (",
               @sprintf("%.5f", choice.guesses_remaining), "/",
               @sprintf("%.5f", choice.guesses_remaining_low), "/",
               @sprintf("%.5f", choice.avg_remaining), "), ",
@@ -23,20 +24,20 @@ function main()
     println()
 
     println("Insert your guess: ")
-    guess = readline(stdin)
+    guess = Vector{UInt8}(readline(stdin))
     println("Insert the results (o = letter at right spot, x = wrong spot, . = not in the word): ")
     constraint_template = readline(stdin)
     constraint = parse_constraints(constraint_template)
     # TODO: build subtree when it does not exist.
     tree = tree.choices[findfirst(c -> c.guess == guess, tree.choices)].constraints[constraint + 1]
     remaining_solutions = filter_solutions_by_constraint(remaining_solutions, guess, constraint)
-    println("Remaining words: ", join(remaining_solutions, ", "))
+    println("Remaining words: ", join(map(s -> str_from_word(s), remaining_solutions), ", "))
   end
-  println("Solution: ", join(remaining_solutions[1]), ".")
+  println("Solution: ", str_from_word(remaining_solutions[1]), ".")
 end
 
 mutable struct Choice
-  guess::String
+  guess::Vector{UInt8}
   avg_remaining::Float64
   guesses_remaining::Float64  # Including this guess, how many guesses until the win
   guesses_remaining_low::Float64  # Lower bound of uncertainty
@@ -52,7 +53,7 @@ mutable struct Tree
   best_choice::Choice
 end
 
-function newTree(guesses::Vector{String}, solutions::Vector{String}, previous_choice::Union{Nothing, Choice})::Tree
+function newTree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}}, previous_choice::Union{Nothing, Choice})::Tree
   nguesses = length(guesses)
   nsols = length(solutions)
 
@@ -77,14 +78,14 @@ function newTree(guesses::Vector{String}, solutions::Vector{String}, previous_ch
     choice.guesses_remaining_low = lower_bound_guesses_remaining(choice, solutions)
   end
   sort!(choices, by = c -> c.guesses_remaining_low)
-  #println("Computed new tree with ", nsols, " solutions. Best guess: ", choices[1].guess, " (", choices[1].avg_remaining, ")")
+  #println("Computed new tree with ", nsols, " solutions. Best guess: ", str_from_word(choices[1].guess), " (", choices[1].avg_remaining, ")")
 
   return Tree(choices[1:100], choices[1])
 end
 
 # Improve the policy by gathering data from using it with all solutions.
 # Returns the average number of guesses to win across all solutions.
-function improve!(tree::Tree, solutions::Vector{String}, guesses::Vector{String})::Float64
+function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Float64
   nsolutions = length(solutions)
   nguesses = length(guesses)
   if nsolutions == 0
@@ -155,7 +156,7 @@ function improve!(tree::Tree, solutions::Vector{String}, guesses::Vector{String}
   choice.visits += 1
   choice.guesses_remaining_low = lower_bound_guesses_remaining(choice, solutions)
   #if nsolutions == 2315
-  #  println("Improving from ", nsolutions, " solutions, explored ", choice.guess, " (",
+  #  println("Improving from ", nsolutions, " solutions, explored ", str_from_word(choice.guess), " (",
   #          @sprintf("%.5f", choice.guesses_remaining), "←",
   #          @sprintf("%.5f", init_guesses_remaining_estimate), "/",
   #          @sprintf("%.5f", init_guesses_remaining_low), "/",
@@ -174,7 +175,7 @@ function best_exploratory_choice(tree::Tree)::Choice
   return best
 end
 
-function lower_bound_guesses_remaining(choice::Choice, solutions::Vector{String})
+function lower_bound_guesses_remaining(choice::Choice, solutions::Vector{Vector{UInt8}})
   nsols = length(solutions)
   policy_estimate = if choice.visits > 1
     choice.guesses_remaining
@@ -201,25 +202,50 @@ function lower_bound_guesses_remaining(choice::Choice, solutions::Vector{String}
 end
 
 function choice_breadcrumb(choice::Choice)
-  choices = choice.guess
+  choices = str_from_word(choice.guess)
   while choice.previous_choice != nothing
     choice = choice.previous_choice
-    choices = @sprintf("%s %s", choice.guess, choices)
+    choices = @sprintf("%s %s", str_from_word(choice.guess), choices)
   end
   return choices
 end
 
-function constraints(guess, actual)::UInt8
+function str_from_word(word::Vector{UInt8})::String
+  String(copy(word))
+end
+
+function constraints(guess::Vector{UInt8}, actual::Vector{UInt8})::UInt8
   constraints = UInt8(0)
+  guess_buf = copy(guess)
+  actual_buf = copy(actual)
+  # We do exact matches in a separate first pass,
+  # because they have priority over mispositioned matches.
   mult = 1
-  for (g, a) in zip(guess, actual)
-    constraints += (g == a ? 2 : (g ∈ actual ? 1 : 0)) * mult
+  for i in 1:5
+    if guess_buf[i] == actual_buf[i]
+      constraints += 2 * mult
+      actual_buf[i] = 1  # Remove the letter, but without the cost.
+      guess_buf[i] = 2   # Remove the letter, but without conflicting with the line above.
+    end
+    mult *= 3
+  end
+  mult = 1
+  for i in 1:5
+    for j in 1:5
+      if guess_buf[i] == actual_buf[j]
+        constraints += mult
+        # Remove the letter so another identical guess letter
+        # will not also match it.
+        actual_buf[j] = 1
+        break
+      end
+    end
     mult *= 3
   end
   return constraints
 end
 
-function filter_solutions_by_constraint(solutions::Vector{String}, guess::String, constraint::UInt8)::Vector{String}
+function filter_solutions_by_constraint(solutions::Vector{Vector{UInt8}}, guess::Vector{UInt8}, constraint::UInt8)::Vector{Vector{UInt8}}
   filter(w -> match_constraints(w, guess, constraint), solutions)
 end
 
@@ -240,27 +266,11 @@ function parse_constraints(template::String)::UInt8
   return constraints
 end
 
-function match_constraints(word::String, guess::String, constraints::UInt8)::Bool
-  for (w, g) in zip(word, guess)
-    if constraints % 3 == 2
-      if w != g
-        return false
-      end
-    elseif constraints % 3 == 1
-      if w == g || g ∉ word
-        return false
-      end
-    else
-      if g ∈ word
-        return false
-      end
-    end
-    constraints ÷= 3
-  end
-  return true
+function match_constraints(word::Vector{UInt8}, guess::Vector{UInt8}, given_constraints::UInt8)::Bool
+  return constraints(guess, word) == given_constraints
 end
 
-function total_guesses_for_all_sols(tree::Tree, guesses::Vector{String}, solutions::Vector{String})::Int
+function total_guesses_for_all_sols(tree::Tree, guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}})::Int
   nguesses = 0
   for solution in solutions
     nguesses += total_guesses_for_sol(tree, solution, guesses, solutions)
@@ -268,7 +278,7 @@ function total_guesses_for_all_sols(tree::Tree, guesses::Vector{String}, solutio
   nguesses
 end
 
-function total_guesses_for_sol(tree::Tree, solution::String, guesses::Vector{String}, solutions::Vector{String})::Int
+function total_guesses_for_sol(tree::Tree, solution::Vector{UInt8}, guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}})::Int
   if length(solutions) == 1
     return 1
   end
@@ -284,4 +294,15 @@ function total_guesses_for_sol(tree::Tree, solution::String, guesses::Vector{Str
   return 1 + total_guesses_for_sol(choice.constraints[c + 1], solution, guesses, remaining_solutions)
 end
 
+
+function test()
+  @test constraints("erase", "melee") == parse_constraints("x...o")
+  @test constraints("erase", "agree") == parse_constraints("xxx.o")
+  @test constraints("erase", "widen") == parse_constraints("x....")
+  @test constraints("erase", "early") == parse_constraints("oxx..")
+  @test constraints("erase", "while") == parse_constraints("....o")
+  @test constraints("alias", "today") == parse_constraints("...o.")
+end
+
+#test()
 main()
