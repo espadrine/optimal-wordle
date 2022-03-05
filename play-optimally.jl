@@ -17,10 +17,10 @@ function main()
       choice = tree.best_choice
       #print(ANSI_RESET_LINE)
       print("We suggest ", str_from_word(choice.guess), " (",
-              @sprintf("%.5f", choice.prob_explore_num / tree.prob_explore_denom), "<",
-              @sprintf("%.5f", choice.guesses_remaining), "~",
-              @sprintf("%.5f", choice.guesses_remaining_approx), "), ",
-              "step ", i, " ")
+              @sprintf("%.4f", choice.prob_explore_num / tree.prob_explore_denom), ":",
+              @sprintf("%.4f", choice.guesses_remaining), "~",
+              @sprintf("%.4f", choice.guesses_remaining_approx), "), ",
+              "step ", i, ". ")
     end
     println()
 
@@ -56,15 +56,16 @@ mutable struct Tree
   choices::Vector{Choice}
   best_choice::Choice
   prob_explore_denom::Float64
+  visits::Int
 end
 
 function newChoice(guess::Vector{UInt8}, prev::Union{Nothing, Choice})::Choice
-  Choice(guess, 1, 1, 1, 1, 1, prev, nothing)
+  Choice(guess, 1, 1, 1, 0, 0, prev, nothing)
 end
 
 function newChoice(guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}}, prev::Union{Nothing, Choice})::Choice
   guesses_remaining_approx = estimate_guesses_remaining(guess, solutions)
-  Choice(guess, Float64(length(solutions)), guesses_remaining_approx, 1, 1, 1, prev, nothing)
+  Choice(guess, Float64(length(solutions)), guesses_remaining_approx, 1, 0, 0, prev, nothing)
 end
 
 function newTree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}}, previous_choice::Union{Nothing, Choice})::Tree
@@ -73,7 +74,7 @@ function newTree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}
 
   if nsols == 1
     choice = newChoice(solutions[1], previous_choice)
-    return Tree([choice], choice, choice.prob_explore_num)
+    return Tree([choice], choice, choice.prob_explore_num, 0)
   end
 
   choices = Vector{Choice}(undef, nguesses)
@@ -88,7 +89,7 @@ function newTree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}
   end
   #println("Computed new tree with ", nsols, " solutions. Best guess: ", str_from_word(choices[1].guess), " (", choices[1].guesses_remaining_approx, ")")
 
-  return Tree(choices[1:100], choices[1], prob_explore_denom)
+  return Tree(choices[1:100], choices[1], prob_explore_denom, 0)
 end
 
 # Improve the policy by gathering data from using it with all solutions.
@@ -104,6 +105,7 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
 
   # Select the next choice based on the optimal-converging policy
   choice = best_exploratory_choice(tree)
+  init_prob_explore = choice.prob_explore_num / tree.prob_explore_denom
   best_guesses_to_win = 0  # Actual best, to update the best score.
 
   # FIXME: speed improvement: loop through solutions if they are less numerous.
@@ -146,7 +148,7 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
   if choice.guesses_remaining < tree.best_choice.guesses_remaining
     tree.best_choice = choice
   end
-  #println("Improving choice ", choice_breadcrumb(choice), " from ", nsolutions, " solutions; guesses_remaining: ", @sprintf("%.5f", choice.guesses_remaining))
+  #println("Improving choice ", choice_breadcrumb(choice), " from ", nsolutions, " solutions; guesses_remaining: ", @sprintf("%.4f", choice.guesses_remaining))
 
   # Recursive constant:
   # tree.best_choice.guesses_remaining matches all recursive best choices.
@@ -161,26 +163,30 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
   # For exploration, we rely on a combined metric that estimates the lower bound
   # of the number of guesses left before winning, based on our uncertainty.
   choice.visits += 1
+  tree.visits += 1
   choice.guesses_remaining_approx = choice.guesses_remaining
-  #choice.guesses_remaining_low = lower_bound_guesses_remaining(choice.guesses_remaining, choice.visits)
   update_prob_explore!(choice, tree)
   if nsolutions == 2315
-    println("Improving from ", nsolutions, " solutions, explored ", str_from_word(choice.guess), " (",
-            @sprintf("%.5f", choice.prob_explore_num / tree.prob_explore_denom), "<",
-            @sprintf("%.5f", choice.guesses_remaining), "~",
-            @sprintf("%.5f", choice.guesses_remaining_approx), "; visits ", choice.visits - 1, ")")
+    println("Explored ", str_from_word(choice.guess), " (",
+            @sprintf("%.4f", init_prob_explore), "→",
+            @sprintf("%.4f", choice.prob_explore_num / tree.prob_explore_denom), ":",
+            @sprintf("%.4f", choice.guesses_remaining), "~",
+            @sprintf("%.4f", choice.guesses_remaining_approx), "; visits ", choice.visits, ")")
   end
   return choice.guesses_remaining
 end
 
 function best_exploratory_choice(tree::Tree)::Choice
-  weighed_choice = rand()
   for choice in tree.choices
     prob_explore = choice.prob_explore_num / tree.prob_explore_denom
-    if weighed_choice < prob_explore
+    visit_ratio = if tree.visits == 0
+      0
+    else
+      choice.visits / tree.visits
+    end
+    if visit_ratio < prob_explore
       return choice
     end
-    weighed_choice -= prob_explore
   end
   return tree.choices[1]
 end
@@ -207,7 +213,11 @@ end
 # Probability that exploring this choice (potentially multiple times)
 # will eventually yield an improvement in its best score.
 function prob_improvement(choice::Choice)::Float64
-  1 - choice.consec_stagnation / choice.visits
+  if choice.visits == 0
+    1
+  else
+    1 - choice.consec_stagnation / choice.visits
+  end
 end
 
 function estimate_guesses_remaining(guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}})
@@ -242,7 +252,7 @@ function lower_bound_guesses_remaining(guesses_remaining::Float64, visits::Int)
   # - and either the accurate results of previous visits using the optimal policy.
   # - or the estimate from the average number of solution remaining
   #   (for when we have no accurate result),
-  return (max(2, guesses_remaining - 0.1) + guesses_remaining * visits) / (visits + 1)
+  return (max(2, guesses_remaining - 0.06) + guesses_remaining * visits) / (visits + 1)
 end
 
 function choice_breadcrumb(choice::Choice)
