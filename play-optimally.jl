@@ -11,7 +11,7 @@ function main()
   remaining_solutions = copy(words)  # List of words that currently fit all known constraints.
   tree = newTree(allowed_guesses, remaining_solutions, nothing)
   while length(remaining_solutions) > 1
-    for i in 1:1000
+    for i in 1:2000
       improve!(tree, remaining_solutions, allowed_guesses)
 
       choice = tree.best_choice
@@ -47,7 +47,8 @@ mutable struct Choice
   # Constraint that Wordle may yield as a response to this guess.
   # We link it lazily to the next choice we make in the tree search.
   visits::Int
-  consec_stagnation::Int  # Number of explorations without an improved best.
+  last_visit::Int  # Number of tree visits during last exploration.
+  improvements::Int  # Number of explorations with an improved best.
   previous_choice::Union{Nothing, Choice}
   constraints::Union{Nothing, Vector{Any}}
 end
@@ -60,12 +61,12 @@ mutable struct Tree
 end
 
 function newChoice(guess::Vector{UInt8}, prev::Union{Nothing, Choice})::Choice
-  Choice(guess, 1, 1, 1, 0, 0, prev, nothing)
+  Choice(guess, 1, 1, 1, 0, -1, 0, prev, nothing)
 end
 
 function newChoice(guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}}, prev::Union{Nothing, Choice})::Choice
   guesses_remaining_approx = estimate_guesses_remaining(guess, solutions)
-  Choice(guess, Float64(length(solutions)), guesses_remaining_approx, 1, 0, 0, prev, nothing)
+  Choice(guess, Float64(length(solutions)), guesses_remaining_approx, 1, 0, -1, 0, prev, nothing)
 end
 
 function newTree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}}, previous_choice::Union{Nothing, Choice})::Tree
@@ -141,9 +142,7 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
   new_guesses_remaining = best_guesses_to_win / nsolutions
   if choice.guesses_remaining > new_guesses_remaining
     choice.guesses_remaining = new_guesses_remaining
-    choice.consec_stagnation = 0
-  else
-    choice.consec_stagnation += 1
+    choice.improvements += 1
   end
   if choice.guesses_remaining < tree.best_choice.guesses_remaining
     tree.best_choice = choice
@@ -163,6 +162,7 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
   # For exploration, we rely on a combined metric that estimates the lower bound
   # of the number of guesses left before winning, based on our uncertainty.
   choice.visits += 1
+  choice.last_visit = tree.visits
   tree.visits += 1
   choice.guesses_remaining_approx = choice.guesses_remaining
   update_prob_explore!(choice, tree)
@@ -177,18 +177,28 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
 end
 
 function best_exploratory_choice(tree::Tree)::Choice
-  for choice in tree.choices
-    prob_explore = choice.prob_explore_num / tree.prob_explore_denom
-    visit_ratio = if tree.visits == 0
-      0
+  min_choice = tree.choices[1]
+  min_next_visit = Inf
+  for (i, choice) in enumerate(tree.choices)
+    # The frequency of visits should match the probability of exploration.
+    next_visit = if choice.last_visit < 0
+      0.0
     else
-      choice.visits / tree.visits
+      choice.last_visit + 1 / (choice.prob_beat_best / tree.sum_prob_beat_best)
     end
-    if visit_ratio < prob_explore
+    if tree.visits >= next_visit
+      # Constant-time iteration that converges to a sorted array.
+      tree.choices[i] = tree.choices[Int(ceil(i/2))]
+      tree.choices[Int(ceil(i/2))] = tree.choices[1]
+      tree.choices[1] = choice
       return choice
     end
+    if next_visit < min_next_visit
+      min_choice = choice
+      min_next_visit = next_visit
+    end
   end
-  return tree.choices[1]
+  return min_choice
 end
 
 # The likelihood that we pick a choice is its worthiness:
@@ -204,6 +214,9 @@ function prob_optimal_choice(choice::Choice, best_choice::Choice)::Float64
   # FIXME: as a gross approximation, we pretend the variance can be computed
   # from two samples set to the mean and the estimated lower bound.
   err = choice.guesses_remaining_approx - lower_bound_guesses_remaining(choice.guesses_remaining_approx, choice.visits)
+  if err == 0
+    return 1
+  end
   variance = err * err
   # We now pretend the difference between this choice’s distribution and the
   # best choice’s is logistic.
@@ -216,7 +229,7 @@ function prob_improvement(choice::Choice)::Float64
   if choice.visits == 0
     1
   else
-    1 - choice.consec_stagnation / choice.visits
+    choice.improvements / choice.visits
   end
 end
 
@@ -252,7 +265,7 @@ function lower_bound_guesses_remaining(guesses_remaining::Float64, visits::Int)
   # - and either the accurate results of previous visits using the optimal policy.
   # - or the estimate from the average number of solution remaining
   #   (for when we have no accurate result),
-  return (max(2, guesses_remaining - 0.06) + guesses_remaining * visits) / (visits + 1)
+  return (max(2, guesses_remaining - 0.07) + guesses_remaining * visits) / (visits + 1)
 end
 
 function choice_breadcrumb(choice::Choice)
