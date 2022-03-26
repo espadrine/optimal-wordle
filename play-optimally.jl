@@ -221,11 +221,11 @@ function best_exploratory_choice(tree::Tree)::Choice
       choice.last_visit + 1 / (choice.prob_beat_best / tree.sum_prob_beat_best)
     end
     if tree.visits >= next_visit
-      # Constant-time iteration that converges to a sorted array.
-      # FIXME: switch to bubble sort.
-      tree.choices[i] = tree.choices[Int(ceil(i/2))]
-      tree.choices[Int(ceil(i/2))] = tree.choices[1]
-      tree.choices[1] = choice
+      if i > 1 && choice.prob_beat_best > tree.choices[i-1].prob_beat_best
+        # Constant-time iteration that converges to a sorted array.
+        tree.choices[i] = tree.choices[i-1]
+        tree.choices[i-1] = choice
+      end
       return choice
     end
     if next_visit < min_next_visit
