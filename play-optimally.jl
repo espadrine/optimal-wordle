@@ -26,7 +26,7 @@ function main()
                 " step ", step, ". ")
       end
     else
-      @time for i in 1:1300
+      @time for i in 1:1000
         improve!(tree, remaining_solutions, allowed_guesses)
         step += 1
 
@@ -66,12 +66,13 @@ mutable struct Choice
   optimal_estimate::Float64
   optimal_estimate_variance::Float64
 
+  prob_optimal::Float64
   prob_beat_best::Float64  # Probability that it can beat the best choice.
   # Constraint that Wordle may yield as a response to this guess.
   # We link it lazily to the next choice we make in the tree search.
   visits::Int
   last_visit::Int  # Number of tree visits during last exploration.
-  improvements::Int  # Number of explorations until last improved best.
+  last_improvement::Int  # Number of explorations until last improved best.
 
   previous_choice::Union{Nothing, Choice}
   constraints::Union{Nothing, Vector{Any}}
@@ -81,6 +82,7 @@ mutable struct Tree
   choices::Vector{Choice}
   best_choice::Choice
   visits::Int
+  sum_prob_optimal::Float64
   sum_prob_beat_best::Float64
   # For optimal estimate computation:
   # best_measured_yet = optimal_estimate + exp_coeff × exp_base^visits
@@ -90,13 +92,13 @@ mutable struct Tree
 end
 
 function newChoice(guess::Vector{UInt8}, prev::Union{Nothing, Choice})::Choice
-  Choice(guess, 1, 0, 0, 1, 0, 1, 0, -1, 0, prev, nothing)
+  Choice(guess, 1, 0, 0, 1, 0, 1, 1, 0, -1, 0, prev, nothing)
 end
 
 function newChoice(guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}}, prev::Union{Nothing, Choice})::Choice
   optimal_estimate = estimate_guesses_remaining(guess, solutions)
   nsols = Float64(length(solutions))
-  Choice(guess, nsols, 0, 0, optimal_estimate, 0, 1, 0, -1, 0, prev, nothing)
+  Choice(guess, nsols, 0, 0, optimal_estimate, 0, 1, 1, 0, -1, 0, prev, nothing)
 end
 
 function newTree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}}, previous_choice::Union{Nothing, Choice})::Tree
@@ -105,37 +107,44 @@ function newTree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}
 
   if nsols == 1
     choice = newChoice(solutions[1], previous_choice)
-    return Tree([choice], choice, 0, choice.prob_beat_best, 0, 0, 0)
+    return Tree([choice], choice, 0, choice.prob_optimal, choice.prob_beat_best, 0, 0, 0)
   end
 
   choices = Vector{Choice}(undef, nguesses)
-  optimal_estimate_mean = 0
   for (i, guess) in enumerate(guesses)
     @inbounds choices[i] = newChoice(guess, solutions, previous_choice)
-    @inbounds optimal_estimate_mean += choices[i].optimal_estimate
   end
-  optimal_estimate_mean /= length(guesses)
   sort!(choices, by = c -> c.optimal_estimate)
 
-  optimal_estimate_variance_of_means = 0
-  for choice in choices
-    optimal_estimate_variance_of_means += (choice.optimal_estimate - optimal_estimate_mean)^2
+  nkept = 100
+  optimal_estimate_mean = 0
+  for choice in choices[1:nkept]
+    optimal_estimate_mean += choice.optimal_estimate
   end
-  optimal_estimate_variance_of_means /= (nguesses-1)
+  optimal_estimate_mean /= nkept
+
+  optimal_estimate_variance = 0
+  for choice in choices[1:nkept]
+    optimal_estimate_variance += (choice.optimal_estimate - optimal_estimate_mean)^2
+  end
+  optimal_estimate_variance /= (nkept-1)
+
   # The variance of the mean of a set of random variables is the sum of their
   # variances. Thus the average variance of each estimate is this:
-  optimal_estimate_variance = optimal_estimate_variance_of_means / nguesses
+  choice_optimal_estimate_variance = optimal_estimate_variance / nkept
 
-  nkept = 100
-  sum_prob_beat_best = 0
+  tree = Tree(choices[1:nkept], choices[1], 0, 0, 0, 0, 0, 0)
   for choice in choices[1:nkept]
-    choice.optimal_estimate_variance = optimal_estimate_variance
-    choice.prob_beat_best = prob_optimal_choice(choice, choices[1])
-    sum_prob_beat_best += choice.prob_beat_best
+    choice.optimal_estimate_variance = choice_optimal_estimate_variance
+    choice.prob_optimal = prob_optimal_choice(choice, tree)
+    tree.sum_prob_optimal += choice.prob_optimal
   end
-  #println("Computed new tree with ", nsols, " solutions. Best guess: ", str_from_word(choices[1].guess), " (", choices[1].optimal_estimate, ")")
+  for choice in choices[1:nkept]
+    choice.prob_beat_best = choice.prob_optimal / tree.sum_prob_optimal
+    tree.sum_prob_beat_best += choice.prob_beat_best
+  end
 
-  return Tree(choices[1:nkept], choices[1], 0, sum_prob_beat_best, 0, 0, 0)
+  return tree
 end
 
 # We measure the mean squared error of the optimal estimate for the guess salet.
@@ -191,15 +200,16 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
   new_guesses_remaining = best_guesses_to_win / nsolutions
   old_best_measured_yet = choice.best_measured_yet
   add_measurement!(choice, new_guesses_remaining, tree)
-  update_optimal_estimate!(choice, old_best_measured_yet, tree)
+  update_optimal_estimate!(choice, tree, old_best_measured_yet)
   update_prob_explore!(choice, tree)
   if nsolutions == 2315
     println("Explored ", str_from_word(choice.guess), " (",
             @sprintf("%.4f", choice.best_measured_yet), "~",
-            @sprintf("%.4f", choice.optimal_estimate), ";",
+            @sprintf("%.4f", choice.optimal_estimate), "±",
+            @sprintf("%.4f", sqrt(choice.optimal_estimate_variance)), ";",
             @sprintf("e=%d%%", round(init_prob_explore * 100)), "→",
             @sprintf("%d%%", round(choice.prob_beat_best / tree.sum_prob_beat_best * 100)), ";",
-            @sprintf("o=%d%%", round(prob_optimal_choice(choice, tree.best_choice) * 100)), ";",
+            @sprintf("o=%d%%", round(choice.prob_optimal / tree.sum_prob_optimal * 100)), ";",
             @sprintf("i=%d%%", round(prob_improvement(choice) * 100)), ";",
             " visits ", choice.visits, ")")
     if str_from_word(choice.guess) == "salet" && salet_accuracy_count < 100
@@ -239,7 +249,7 @@ end
 function add_measurement!(choice::Choice, new_measurement::Float64, tree::Tree)
   if choice.best_measured_yet > new_measurement
     choice.best_measured_yet = new_measurement
-    choice.improvements += 1
+    choice.last_improvement = choice.visits + 1
   end
   if choice.best_measured_yet < tree.best_choice.best_measured_yet
     tree.best_choice = choice
@@ -264,7 +274,7 @@ function add_measurement!(choice::Choice, new_measurement::Float64, tree::Tree)
 end
 
 # Improve estimate of the optimal number of guesses to win for a given choice.
-function update_optimal_estimate!(choice::Choice, old_best_measured_yet::Float64, tree::Tree)
+function update_optimal_estimate!(choice::Choice, tree::Tree, old_best_measured_yet::Float64)
   # The theory is: the best measured guess count will exponentially improve
   # as more explorations are performed. It converges to the plateau where the
   # optimal guess count lies, with diminishing returns.
@@ -291,8 +301,6 @@ function update_optimal_estimate!(choice::Choice, old_best_measured_yet::Float64
     tree.exp_base = (tree.exp_base * tree.exp_count + new_exp_base) / (tree.exp_count+1)
     # => b = y'1 ÷ (c×log(c))
     new_exp_coeff = choice.init_diff_best_measured_yet / (tree.exp_base*log(tree.exp_base))
-    #new_exp_coeff = choice.diff_best_measured_yet /
-    #  (tree.exp_base^choice.visits - tree.exp_base^(choice.visits-1))
     tree.exp_coeff = (tree.exp_coeff * tree.exp_count + new_exp_coeff) / (tree.exp_count+1)
     tree.exp_count += 1
     #if choice.previous_choice == nothing
@@ -301,57 +309,65 @@ function update_optimal_estimate!(choice::Choice, old_best_measured_yet::Float64
   end
 
   # => a = yi - bc^i
-  # FIXME: the estimate can really swing; using the average may be more stable.
   new_optimal_estimate = choice.best_measured_yet - tree.exp_coeff*tree.exp_base^choice.visits
-  # FIXME: Old awful estimates have a big impact on current estimates.
-  # We can weigh by inverse variance.
-  old_optimal_estimate = choice.optimal_estimate
-  choice.optimal_estimate = new_optimal_estimate #(choice.optimal_estimate * choice.visits + new_optimal_estimate) / (choice.visits+1)
-  if choice.optimal_estimate > choice.best_measured_yet
-    choice.optimal_estimate = choice.best_measured_yet + choice.diff_best_measured_yet
+  if new_optimal_estimate > choice.best_measured_yet
+    new_optimal_estimate = choice.best_measured_yet + choice.current_diff_best_measured_yet
   end
-  squared_error = (new_optimal_estimate - choice.optimal_estimate)^2
-  choice.optimal_estimate_variance = ((
+  old_optimal_estimate = choice.optimal_estimate
+  choice.optimal_estimate = new_optimal_estimate
+
+  # Update the choice’s optimal estimate variance.
+  choice_squared_error = (new_optimal_estimate - old_optimal_estimate)^2
+  old_choice_optimal_estimate_variance = choice.optimal_estimate_variance
+  new_choice_optimal_estimate_variance = ((
       # Extract the average error
       sqrt(choice.optimal_estimate_variance * choice.visits)
       # Update the error to the new mean
       + old_optimal_estimate - choice.optimal_estimate
      )^2
-    + squared_error) / (choice.visits+1)
+    + choice_squared_error) / (choice.visits+1)
+  choice.optimal_estimate_variance = new_choice_optimal_estimate_variance
 end
 
 # The likelihood that we pick a choice is its worthiness:
 # the odds that it is optimal and that its exploration improves its score.
 function update_prob_explore!(choice::Choice, tree::Tree)::Float64
-  new_prob_beat_best = prob_optimal_choice(choice, tree.best_choice) * prob_improvement(choice)
-  tree.sum_prob_beat_best = tree.sum_prob_beat_best - choice.prob_beat_best + new_prob_beat_best
+  new_prob_optimal = prob_optimal_choice(choice, tree)
+  tree.sum_prob_optimal += new_prob_optimal - choice.prob_optimal
+  choice.prob_optimal = new_prob_optimal
+
   # FIXME: extreme transient values can doom good choices,
   # as their prob doesn't get recomputed until they get reconsidered
   # (which with low prob is unlikely).
+  new_prob_beat_best = (choice.prob_optimal / tree.sum_prob_optimal) * prob_improvement(choice)
+  tree.sum_prob_beat_best += new_prob_beat_best - choice.prob_beat_best
   choice.prob_beat_best = new_prob_beat_best
 end
 
 # Probability that this choice is optimal under perfect play.
-function prob_optimal_choice(choice::Choice, best_choice::Choice)::Float64
-  variance = choice.optimal_estimate_variance + best_choice.optimal_estimate_variance
-  if variance == 0
-    println("prob optim ", str_from_word(choice.guess), " variance 0 for choice var=", choice.optimal_estimate_variance, " and best var=", best_choice.optimal_estimate_variance)
-    return 1  # FIXME: we should have the optimal probabilities of all choices sum to 1.
+function prob_optimal_choice(choice::Choice, tree::Tree)::Float64
+  prob = 1
+  for other in tree.choices
+    prob *= prob_more_optimal(choice, other)
   end
-  #if choice.previous_choice == nothing
-  #  println(" ", str_from_word(choice.guess), " prob improv: var1=", choice.optimal_estimate_variance, " var2=", best_choice.optimal_estimate_variance , " var=", variance, " p=", 1 / (1 + exp(-(0-(choice.optimal_estimate-best_choice.optimal_estimate))/(sqrt(3*variance)/pi))))
-  #end
-  # We now pretend the difference between this choice’s distribution
-  # and the best choice’s is logistic.
-  # FIXME: it is capped at 50% for the best choice;
-  # comparing to a Gumbel of the other choices would be more accurate.
-  1 / (1 + exp(-(0-(choice.optimal_estimate-best_choice.optimal_estimate))/(sqrt(3*variance)/pi)))
+  return prob
 end
 
-# Probability that exploring this choice will yield an improvement.
+function prob_more_optimal(choice::Choice, other::Choice)::Float64
+  variance = choice.optimal_estimate_variance + other.optimal_estimate_variance
+  if variance == 0
+    return 1
+  end
+  # We now pretend the difference between this choice’s distribution
+  # and the best choice’s is logistic.
+  choice_mu = -choice.optimal_estimate  # We consider it to be the mode of its Gumbel.
+  other_mu = -other.optimal_estimate
+  return 1 - 1 / (1 + exp(-(0-(choice_mu-other_mu))/(sqrt(3*variance)/pi)))
+end
+
+# Probability that exploring this choice will eventually yield an improvement.
 function prob_improvement(choice::Choice)::Float64
-  # Rule of succession.
-  return (choice.improvements+1) / (choice.visits+2)
+  return choice.last_improvement / choice.visits
 end
 
 function estimate_guesses_remaining(guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}})
