@@ -81,6 +81,7 @@ end
 mutable struct Tree
   choices::Vector{Choice}
   best_choice::Choice
+  second_best_choice::Choice
   visits::Int
   sum_prob_optimal::Float64
   sum_prob_beat_best::Float64
@@ -107,7 +108,7 @@ function newTree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}
 
   if nsols == 1
     choice = newChoice(solutions[1], previous_choice)
-    return Tree([choice], choice, 0, choice.prob_optimal, choice.prob_beat_best, 0, 0, 0)
+    return Tree([choice], choice, choice, 0, choice.prob_optimal, choice.prob_beat_best, 0, 0, 0)
   end
 
   choices = Vector{Choice}(undef, nguesses)
@@ -129,11 +130,12 @@ function newTree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}
   end
   optimal_estimate_variance /= (nkept-1)
 
-  # The variance of the mean of a set of random variables is the sum of their
-  # variances. Thus the average variance of each estimate is this:
-  choice_optimal_estimate_variance = optimal_estimate_variance / nkept
+  # The variance of the mean of a set of random variables Xi is:
+  # var((ΣXi)÷N) = (Σvar(Xi))÷N² = σ²÷N
+  # Thus the average variance of each estimate is this:
+  choice_optimal_estimate_variance = optimal_estimate_variance * nkept
 
-  tree = Tree(choices[1:nkept], choices[1], 0, 0, 0, 0, 0, 0)
+  tree = Tree(choices[1:nkept], choices[1], choices[2], 0, 0, 0, 0, 0, 0)
   for choice in choices[1:nkept]
     choice.optimal_estimate_variance = choice_optimal_estimate_variance
     choice.prob_optimal = prob_optimal_choice(choice, tree)
@@ -182,12 +184,12 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
       continue
     end
 
-    if choice.constraints == nothing
+    if isnothing(choice.constraints)
       choice.constraints = Vector{Union{Tree, Nothing}}(nothing, 243)
     end
     subtree = choice.constraints[constraint + 1]
 
-    if subtree == nothing        # Initialize the next move.
+    if isnothing(subtree)        # Initialize the next move.
       subtree = newTree(guesses, remaining_solutions, choice)
       choice.constraints[constraint + 1] = subtree
     end
@@ -252,6 +254,7 @@ function add_measurement!(choice::Choice, new_measurement::Float64, tree::Tree)
     choice.last_improvement = choice.visits + 1
   end
   if choice.best_measured_yet < tree.best_choice.best_measured_yet
+    tree.second_best_choice = tree.best_choice
     tree.best_choice = choice
   end
   #println("Improving choice ", choice_breadcrumb(choice), " from ", nsolutions, " solutions; best_measured_yet: ", @sprintf("%.4f", choice.best_measured_yet))
@@ -303,16 +306,13 @@ function update_optimal_estimate!(choice::Choice, tree::Tree, old_best_measured_
     new_exp_coeff = choice.init_diff_best_measured_yet / (tree.exp_base*log(tree.exp_base))
     tree.exp_coeff = (tree.exp_coeff * tree.exp_count + new_exp_coeff) / (tree.exp_count+1)
     tree.exp_count += 1
-    #if choice.previous_choice == nothing
+    #if isnothing(choice.previous_choice)
     #  print(" diff=", @sprintf("%.4f", diff_best_measured_now), " init=", @sprintf("%.4f", choice.init_diff_best_measured_yet), " current=", @sprintf("%.4f", choice.current_diff_best_measured_yet), " base:", @sprintf("%.4f", tree.exp_base), " coeff:", @sprintf("%.4f", tree.exp_coeff), " ")
     #end
   end
 
   # => a = yi - bc^i
-  new_optimal_estimate = choice.best_measured_yet - tree.exp_coeff*tree.exp_base^choice.visits
-  if new_optimal_estimate > choice.best_measured_yet
-    new_optimal_estimate = choice.best_measured_yet + choice.current_diff_best_measured_yet
-  end
+  new_optimal_estimate = estimate_optimal(choice, tree)
   old_optimal_estimate = choice.optimal_estimate
   choice.optimal_estimate = new_optimal_estimate
 
@@ -329,19 +329,40 @@ function update_optimal_estimate!(choice::Choice, tree::Tree, old_best_measured_
   choice.optimal_estimate_variance = new_choice_optimal_estimate_variance
 end
 
+function estimate_optimal(choice::Choice, tree::Tree)::Float64
+  if choice.visits == 0
+    return choice.optimal_estimate
+  end
+  new_optimal_estimate = choice.best_measured_yet - tree.exp_coeff*tree.exp_base^choice.visits
+  if new_optimal_estimate > choice.best_measured_yet
+    new_optimal_estimate = choice.best_measured_yet + choice.current_diff_best_measured_yet
+  end
+  return new_optimal_estimate
+end
+
 # The likelihood that we pick a choice is its worthiness:
 # the odds that it is optimal and that its exploration improves its score.
-function update_prob_explore!(choice::Choice, tree::Tree)::Float64
-  new_prob_optimal = prob_optimal_choice(choice, tree)
-  tree.sum_prob_optimal += new_prob_optimal - choice.prob_optimal
-  choice.prob_optimal = new_prob_optimal
+function update_prob_explore!(choice::Choice, tree::Tree)
+  for c in tree.choices
+    c.optimal_estimate = estimate_optimal(c, tree)
+  end
+  sum_prob_optimal = 0
+  for c in tree.choices
+    c.prob_optimal = prob_optimal_choice(c, tree)
+    sum_prob_optimal += c.prob_optimal
+  end
+  tree.sum_prob_optimal = sum_prob_optimal
+  sum_prob_beat_best = 0
+  for c in tree.choices
+    c.prob_beat_best = (c.prob_optimal / tree.sum_prob_optimal) * prob_improvement(c)
+    sum_prob_beat_best += c.prob_beat_best
+  end
+  tree.sum_prob_beat_best = sum_prob_beat_best
 
-  # FIXME: extreme transient values can doom good choices,
-  # as their prob doesn't get recomputed until they get reconsidered
-  # (which with low prob is unlikely).
-  new_prob_beat_best = (choice.prob_optimal / tree.sum_prob_optimal) * prob_improvement(choice)
-  tree.sum_prob_beat_best += new_prob_beat_best - choice.prob_beat_best
-  choice.prob_beat_best = new_prob_beat_best
+  if isnothing(choice.previous_choice)
+    println()
+    print_tree(tree)
+  end
 end
 
 # Probability that this choice is optimal under perfect play.
@@ -367,6 +388,9 @@ end
 
 # Probability that exploring this choice will eventually yield an improvement.
 function prob_improvement(choice::Choice)::Float64
+  if choice.visits <= 0
+    return 1
+  end
   return choice.last_improvement / choice.visits
 end
 
@@ -383,7 +407,7 @@ function estimate_guesses_remaining(guess::Vector{UInt8}, solutions::Vector{Vect
   # We have s solutions currently, such that q^(n-1) = s. Thus n = 1 + log(s)÷log(q).
   # We multiply by 1.12 as that is experimentally the ratio needed to match
   # the observed number of guesses to a win.
-  1.12 * (1 + (prob_sol * 0 + (1-prob_sol) * (log(nsols) / log(nsols / avg_remaining))))
+  return (1 + (prob_sol * 0 + (1-prob_sol) * (log(nsols) / log(nsols / avg_remaining))))
 end
 
 # Compute the average remaining solutions for each guess.
@@ -395,14 +419,19 @@ function average_remaining_solutions_after_guess(guess::Vector{UInt8}, solutions
   sum(abs2, counts) / length(solutions)
 end
 
-function lower_bound_guesses_remaining(best_measured_yet::Float64, visits::Int)
-  # We compute the weighed average of `visits + 2` measurements:
-  # - an optimistic future exploration that would find the solution in 1 guess
-  #   on top of the guess for this choice (for lower bound uncertainty),
-  # - and either the accurate results of previous visits using the optimal policy.
-  # - or the estimate from the average number of solution remaining
-  #   (for when we have no accurate result),
-  return (max(2, best_measured_yet - 0.07) + best_measured_yet * visits) / (visits + 1)
+function print_tree(tree::Tree)
+  println("tree.sum_prob_optimal = ", tree.sum_prob_optimal)
+  println("tree.sum_prob_beat_best = ", tree.sum_prob_beat_best)
+  for c in tree.choices
+    println(str_from_word(c.guess), " ", @sprintf("%.4f", c.best_measured_yet),
+      "~", @sprintf("%.4f", c.optimal_estimate),
+      "±", @sprintf("%.4f", sqrt(c.optimal_estimate_variance)),
+      " o=", @sprintf("%.4f", c.prob_optimal / tree.sum_prob_optimal),
+      " i=", @sprintf("%.4f", prob_improvement(c)),
+      " b=", @sprintf("%.4f", c.prob_beat_best / tree.sum_prob_beat_best),
+      " v=", c.visits,
+     )
+  end
 end
 
 function choice_breadcrumb(choice::Choice)
@@ -507,6 +536,7 @@ function test()
     ["erase", "early", "oxx.."],
     ["erase", "while", "....o"],
     ["alias", "today", "...o."],
+    ["chuck", "chunk", "ooo.o"],
   ]
 
   for test in constraint_tests
