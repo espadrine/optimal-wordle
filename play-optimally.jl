@@ -13,14 +13,14 @@ function main()
   while length(remaining_solutions) > 1
     step = 0
     if length(remaining_solutions) == 2315
-      @time while tree.best_choice.best_measured_yet > 3.4212
+      @time while tree.best_choice.best_measured_yet < -3.4212
         improve!(tree, remaining_solutions, allowed_guesses)
         step += 1
 
         choice = tree.best_choice
         print("We suggest ", str_from_word(choice.guess), " (",
-                @sprintf("%.4f", choice.best_measured_yet), "~",
-                @sprintf("%.4f", choice.optimal_estimate),
+                @sprintf("%.4f", -choice.best_measured_yet), "~",
+                @sprintf("%.4f", -choice.optimal_estimate),
                 "[mse=", @sprintf("%.5f", salet_accuracy), "];",
                 @sprintf("s=%d%%", round(choice.prob_beat_best * 100)), ")",
                 " step ", step, ". ")
@@ -33,8 +33,8 @@ function main()
         choice = tree.best_choice
         print(ANSI_RESET_LINE)
         print("We suggest ", str_from_word(choice.guess), " (",
-                @sprintf("%.4f", choice.best_measured_yet), "~",
-                @sprintf("%.4f", choice.optimal_estimate), ";",
+                @sprintf("%.4f", -choice.best_measured_yet), "~",
+                @sprintf("%.4f", -choice.optimal_estimate), ";",
                 @sprintf("s=%d%%", round(choice.prob_beat_best * 100)), ")",
                 " step ", step, ". ")
       end
@@ -93,13 +93,13 @@ mutable struct Tree
 end
 
 function newChoice(guess::Vector{UInt8}, prev::Union{Nothing, Choice})::Choice
-  Choice(guess, 1, 0, 0, 1, 0, 1, 1, 0, -1, 0, prev, nothing)
+  Choice(guess, -1, 0, 0, -1, 0, 1, 1, 0, -1, 0, prev, nothing)
 end
 
 function newChoice(guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}}, prev::Union{Nothing, Choice})::Choice
   optimal_estimate = estimate_guesses_remaining(guess, solutions)
   nsols = Float64(length(solutions))
-  Choice(guess, nsols, 0, 0, optimal_estimate, 0, 1, 1, 0, -1, 0, prev, nothing)
+  Choice(guess, -nsols, 0, 0, optimal_estimate, 0, 1, 1, 0, -1, 0, prev, nothing)
 end
 
 function newTree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}}, previous_choice::Union{Nothing, Choice})::Tree
@@ -115,7 +115,7 @@ function newTree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}
   for (i, guess) in enumerate(guesses)
     @inbounds choices[i] = newChoice(guess, solutions, previous_choice)
   end
-  sort!(choices, by = c -> c.optimal_estimate)
+  sort!(choices, by = c -> -c.optimal_estimate)
 
   nkept = 100
   optimal_estimate_mean = 0
@@ -171,19 +171,21 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
 
   # FIXME: speed improvement: loop through solutions if they are less numerous.
   for constraint in UInt8(0):UInt8(242)
+    # State transition.
     remaining_solutions = filter_solutions_by_constraint(solutions, choice.guess, constraint)
     nrsols = length(remaining_solutions)
     if nrsols == 0
       continue
     elseif nrsols == 1
       if constraint == 0xf2  # All characters are valid: we won in 1 guess.
-        best_guesses_to_win += 1
+        best_guesses_to_win -= 1
       else                   # The solution is found: we win on the next guess.
-        best_guesses_to_win += 2
+        best_guesses_to_win -= 2
       end
       continue
     end
 
+    # Subtree construction
     if isnothing(choice.constraints)
       choice.constraints = Vector{Union{Tree, Nothing}}(nothing, 243)
     end
@@ -195,7 +197,7 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
     end
     improve!(subtree, remaining_solutions, guesses)
     # For each solution, we made one guess, on top of the guesses left to end the game.
-    best_guesses_to_win += (1 + subtree.best_choice.best_measured_yet) * nrsols
+    best_guesses_to_win += (subtree.best_choice.best_measured_yet - 1) * nrsols
   end
 
   # Update information about the current best policy.
@@ -206,8 +208,8 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
   update_prob_explore!(choice, tree)
   if nsolutions == 2315
     println("Explored ", str_from_word(choice.guess), " (",
-            @sprintf("%.4f", choice.best_measured_yet), "~",
-            @sprintf("%.4f", choice.optimal_estimate), "±",
+            @sprintf("%.4f", -choice.best_measured_yet), "~",
+            @sprintf("%.4f", -choice.optimal_estimate), "±",
             @sprintf("%.4f", sqrt(choice.optimal_estimate_variance)), ";",
             @sprintf("e=%d%%", round(init_prob_explore * 100)), "→",
             @sprintf("%d%%", round(choice.prob_beat_best / tree.sum_prob_beat_best * 100)), ";",
@@ -215,7 +217,7 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
             @sprintf("i=%d%%", round(prob_improvement(choice) * 100)), ";",
             " visits ", choice.visits, ")")
     if str_from_word(choice.guess) == "salet" && salet_accuracy_count < 100
-      global salet_accuracy = ((salet_accuracy * salet_accuracy_count) + (choice.optimal_estimate - 3.4212)^2) / (salet_accuracy_count+1)
+      global salet_accuracy = ((salet_accuracy * salet_accuracy_count) + (choice.optimal_estimate - -3.4212)^2) / (salet_accuracy_count+1)
       global salet_accuracy_count += 1
     end
   end
@@ -249,11 +251,11 @@ function best_exploratory_choice(tree::Tree)::Choice
 end
 
 function add_measurement!(choice::Choice, new_measurement::Float64, tree::Tree)
-  if choice.best_measured_yet > new_measurement
+  if new_measurement > choice.best_measured_yet
     choice.best_measured_yet = new_measurement
     choice.last_improvement = choice.visits + 1
   end
-  if choice.best_measured_yet < tree.best_choice.best_measured_yet
+  if choice.best_measured_yet > tree.best_choice.best_measured_yet
     tree.second_best_choice = tree.best_choice
     tree.best_choice = choice
   end
@@ -334,7 +336,7 @@ function estimate_optimal(choice::Choice, tree::Tree)::Float64
     return choice.optimal_estimate
   end
   new_optimal_estimate = choice.best_measured_yet - tree.exp_coeff*tree.exp_base^choice.visits
-  if new_optimal_estimate > choice.best_measured_yet
+  if new_optimal_estimate < choice.best_measured_yet
     new_optimal_estimate = choice.best_measured_yet + choice.current_diff_best_measured_yet
   end
   return new_optimal_estimate
@@ -381,8 +383,8 @@ function prob_more_optimal(choice::Choice, other::Choice)::Float64
   end
   # We now pretend the difference between this choice’s distribution
   # and the best choice’s is logistic.
-  choice_mu = -choice.optimal_estimate  # We consider it to be the mode of its Gumbel.
-  other_mu = -other.optimal_estimate
+  choice_mu = choice.optimal_estimate  # We consider it to be the mode of its Gumbel.
+  other_mu = other.optimal_estimate
   return 1 - 1 / (1 + exp(-(0-(choice_mu-other_mu))/(sqrt(3*variance)/pi)))
 end
 
@@ -405,9 +407,7 @@ function estimate_guesses_remaining(guess::Vector{UInt8}, solutions::Vector{Vect
   # To estimate the number of remaining guesses n to win, we assume that we
   # maintain a constant ratio q of removed solutions after each guess.
   # We have s solutions currently, such that q^(n-1) = s. Thus n = 1 + log(s)÷log(q).
-  # We multiply by 1.12 as that is experimentally the ratio needed to match
-  # the observed number of guesses to a win.
-  return (1 + (prob_sol * 0 + (1-prob_sol) * (log(nsols) / log(nsols / avg_remaining))))
+  return -(1 + (prob_sol * 0 + (1-prob_sol) * (log(nsols) / log(nsols / avg_remaining))))
 end
 
 # Compute the average remaining solutions for each guess.
@@ -423,8 +423,8 @@ function print_tree(tree::Tree)
   println("tree.sum_prob_optimal = ", tree.sum_prob_optimal)
   println("tree.sum_prob_beat_best = ", tree.sum_prob_beat_best)
   for c in tree.choices
-    println(str_from_word(c.guess), " ", @sprintf("%.4f", c.best_measured_yet),
-      "~", @sprintf("%.4f", c.optimal_estimate),
+    println(str_from_word(c.guess), " ", @sprintf("%.4f", -c.best_measured_yet),
+      "~", @sprintf("%.4f", -c.optimal_estimate),
       "±", @sprintf("%.4f", sqrt(c.optimal_estimate_variance)),
       " o=", @sprintf("%.4f", c.prob_optimal / tree.sum_prob_optimal),
       " i=", @sprintf("%.4f", prob_improvement(c)),
