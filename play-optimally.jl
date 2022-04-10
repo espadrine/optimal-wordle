@@ -222,11 +222,12 @@ function best_exploratory_choice(tree::Tree, solutions::Vector{Vector{UInt8}}, g
   end
   # We had no choice whose frequency made it immediately eligible.
   # Does the non-cached choices’ probability give it an eligible frequency?
-  next_visit = tree.last_non_cache_visit + 1 / (tree.prob_non_cached_optimal / tree.sum_prob_optimal)
+  prob_optimal_is_not_cached = tree.prob_non_cached_optimal / tree.sum_prob_optimal
+  next_visit = tree.last_non_cache_visit + 1 / prob_optimal_is_not_cached
   if tree.visits >= next_visit
     return best_non_cached_exploratory_choice(tree, guesses, solutions)
   end
-  return soonest_cached_exploratory_choice(tree, next_visit, guesses, solutions)
+  return soonest_cached_exploratory_choice(tree, prob_optimal_is_not_cached, guesses, solutions)
 end
 
 function best_cached_exploratory_choice(tree::Tree)::Union{Tuple{Choice, Int}, Nothing}
@@ -257,7 +258,7 @@ function best_non_cached_exploratory_choice(tree::Tree, guesses::Vector{Vector{U
   return choice, length(tree.choices)
 end
 
-function soonest_cached_exploratory_choice(tree::Tree, next_non_cache_visit::Float64, guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}})::Tuple{Choice, Int}
+function soonest_cached_exploratory_choice(tree::Tree, prob_optimal_is_not_cached::Float64, guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}})::Tuple{Choice, Int}
   min_choice = tree.choices[1]
   min_idx = 1
   min_next_visit = Inf
@@ -269,7 +270,11 @@ function soonest_cached_exploratory_choice(tree::Tree, next_non_cache_visit::Flo
       min_next_visit = next_visit
     end
   end
-  if next_non_cache_visit < min_next_visit
+  # The visit frequency of the next non-cached choice is taken by dividing
+  # the probability that any non-cached choice is optimal, by the number of
+  # non-cached choices.
+  next_non_cached_choice_visit = tree.last_non_cache_visit + 1 / (prob_optimal_is_not_cached / (length(guesses) - length(tree.choices)))
+  if next_non_cached_choice_visit < min_next_visit
     return best_non_cached_exploratory_choice(tree, guesses, solutions)
   end
   if isnothing(tree.previous_choice)
@@ -346,15 +351,25 @@ function update_optimal_estimate!(choice::Choice, tree::Tree, old_best_measured_
 
   # Update the choice’s optimal estimate variance.
   choice_squared_error = (new_optimal_estimate - old_optimal_estimate)^2
-  old_choice_optimal_estimate_variance = choice.optimal_estimate_variance
-  new_choice_optimal_estimate_variance = ((
-      # Extract the average error
-      sqrt(choice.optimal_estimate_variance * choice.visits)
-      # Update the error to the new mean
-      + old_optimal_estimate - choice.optimal_estimate
-     )^2
-    + choice_squared_error) / (choice.visits+1)
-  choice.optimal_estimate_variance = new_choice_optimal_estimate_variance
+  if choice.visits <= 1
+    # FIXME: We are including the visitless estimation in our variance estimate.
+    # However, melding the variance of two estimation sources is invalid,
+    # as each source has a separate, incompatible uncertainty arising from its
+    # distinct algorithm. Thus the variance of the visitless estimate should
+    # be unaffected by the variance of the measurement estiamtes
+    # (and, when we implement them, of the recursive value estimates).
+    choice.optimal_estimate_variance = choice_squared_error
+  else
+    old_choice_optimal_estimate_variance = choice.optimal_estimate_variance
+    new_choice_optimal_estimate_variance = ((
+        # Extract the average error
+        sqrt(choice.optimal_estimate_variance * choice.visits)
+        # Update the error to the new mean
+        + old_optimal_estimate - choice.optimal_estimate
+       )^2
+      + choice_squared_error) / (choice.visits+1)
+    choice.optimal_estimate_variance = new_choice_optimal_estimate_variance
+  end
 end
 
 function estimate_optimal(choice::Choice, tree::Tree)::Float64
@@ -394,29 +409,14 @@ end
 
 # Probability that this choice is optimal under perfect play.
 function prob_optimal_choice(optimal_estimate::Float64, optimal_estimate_variance::Float64, tree::Tree)::Float64
-  # We estimate it by comparing the probability that a choice reaches the
-  # current overall optimal estimate, under the categorical distribution.
-  optimum = if isnothing(tree.best_choice)
-    optimal_estimate
-  else
-    tree.best_choice.optimal_estimate
+  prob = 1
+  for other in tree.choices
+    prob *= prob_superior_choice(optimal_estimate, optimal_estimate_variance, other)
   end
-  # We assume that optimal estimates follows a Gumbel distribution,
-  # since it is the maximum of a set of current-best-measurements
-  # which follow an exponential distribution.
-  mode = optimal_estimate
-  beta = sqrt(optimal_estimate_variance * 6 / pi^2)
-  z = (optimum - mode) / beta
-  return exp(-(z + exp(-z))) / beta
-
-  #prob = 1
-  #for other in tree.choices
-  #  prob *= prob_more_optimal(optimal_estimate, optimal_estimate_variance, other)
-  #end
-  #return prob
+  return prob
 end
 
-function prob_more_optimal(optimal_estimate::Float64, optimal_estimate_variance::Float64, other::Choice)::Float64
+function prob_superior_choice(optimal_estimate::Float64, optimal_estimate_variance::Float64, other::Choice)::Float64
   variance = optimal_estimate_variance + other.optimal_estimate_variance
   if variance == 0
     return 1
@@ -426,6 +426,28 @@ function prob_more_optimal(optimal_estimate::Float64, optimal_estimate_variance:
   choice_mu = optimal_estimate  # We consider it to be the mode of its Gumbel.
   other_mu = other.optimal_estimate
   return 1 - 1 / (1 + exp(-(0-(choice_mu-other_mu))/(sqrt(3*variance)/pi)))
+end
+
+# Alternative estimate of the probability of a choice being optimal.
+function prob_choice_reaching_optimal(optimal_estimate::Float64, optimal_estimate_variance::Float64, tree::Tree)::Float64
+  # We estimate it by comparing the probability that a choice reaches the
+  # current overall optimal estimate, under the categorical distribution.
+  optimum = if isnothing(tree.best_choice)
+    optimal_estimate
+  else
+    tree.best_choice.optimal_estimate
+  end
+  # We assume that optimal estimates follow a Gumbel distribution,
+  # since it is the maximum of a set of current-best-measurements
+  # which follow an exponential distribution.
+  mode = optimal_estimate
+  # FIXME: we are comparing optimality probabilities between choices which had a
+  # large number of guesses, improving their variance, and choices that did not.
+  # Ideally, they should be compared with a variance that they would have after
+  # the same number of visits.
+  beta = sqrt(optimal_estimate_variance * 6 / pi^2)
+  z = (optimum - mode) / beta
+  return exp(-(z + exp(-z))) / beta
 end
 
 # Probability that exploring this choice will eventually yield an improvement.
