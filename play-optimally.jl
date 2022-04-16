@@ -61,6 +61,8 @@ mutable struct Choice
   # Including this guess, how many guesses until the win using the current best
   # policy. It is always an upper bound for the optimal value.
   best_measured_yet::Float64
+  tree_optimal_estimate::Float64
+  tree_optimal_estimate_variance::Float64
   # Estimated slope of measurement to estimate the optimal.
   init_diff_best_measured_yet::Float64    # Diff at 0 visits
   current_diff_best_measured_yet::Float64 # Diff at the current visit
@@ -96,12 +98,14 @@ mutable struct Tree
 end
 
 function newChoice(guess::Vector{UInt8})::Choice
-  Choice(nothing, guess, -1, 0, 0, -1, 0, 1, 1, 0, -1, 0, nothing)
+  tree_optimal_estimate = -1
+  tree_optimal_estimate_variance = 0
+  Choice(nothing, guess, -1, tree_optimal_estimate, tree_optimal_estimate_variance, 0, 0, -1, 0, 1, 1, 0, -1, 0, nothing)
 end
 
 function newChoice(guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}}, optimal_estimate::Float64, optimal_estimate_variance::Float64)::Choice
   nsols = Float64(length(solutions))
-  Choice(nothing, guess, -nsols, 0, 0, optimal_estimate, optimal_estimate_variance, 1, 1, 0, -1, 0, nothing)
+  Choice(nothing, guess, -nsols, optimal_estimate, optimal_estimate_variance, 0, 0, optimal_estimate, optimal_estimate_variance, 1, 1, 0, -1, 0, nothing)
 end
 
 function newTree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}}, previous_choice::Union{Choice, Nothing})::Tree
@@ -148,6 +152,7 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
   choice = best_exploratory_choice_with_ordering!(tree, solutions, guesses)
   init_prob_explore = choice.prob_beat_best / tree.sum_prob_beat_best
   best_guesses_to_win = 0  # Measured best, to update the best score.
+  new_tree_optimal_estimate = 0
 
   # FIXME: speed improvement: loop through solutions if they are less numerous.
   for constraint in UInt8(0):UInt8(242)
@@ -158,8 +163,10 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
       continue
     elseif nrsols == 1
       if constraint == 0xf2  # All characters are valid: we won in 1 guess.
+        new_tree_optimal_estimate -= 1
         best_guesses_to_win -= 1
       else                   # The solution is found: we win on the next guess.
+        new_tree_optimal_estimate -= 2
         best_guesses_to_win -= 2
       end
       continue
@@ -174,17 +181,22 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
     if isnothing(subtree)        # Initialize the next move.
       subtree = newTree(guesses, remaining_solutions, choice)
       choice.constraints[constraint + 1] = subtree
+    else
+      improve!(subtree, remaining_solutions, guesses)
     end
-    improve!(subtree, remaining_solutions, guesses)
     # For each solution, we made one guess, on top of the guesses left to end the game.
     best_guesses_to_win += (subtree.best_choice.best_measured_yet - 1) * nrsols
+    new_tree_optimal_estimate += (subtree.best_choice.tree_optimal_estimate - 1) * nrsols
   end
 
   # Update information about the current best policy.
   new_guesses_remaining = best_guesses_to_win / nsolutions
+  new_tree_optimal_estimate /= nsolutions
   old_best_measured_yet = choice.best_measured_yet
+  old_tree_optimal_estimate = choice.tree_optimal_estimate
   add_measurement!(choice, new_guesses_remaining, tree)
-  update_optimal_estimate!(choice, tree, old_best_measured_yet)
+  update_tree_optimal_estimate!(choice, tree, new_tree_optimal_estimate)
+  update_optimal_estimate!(choice, tree, old_tree_optimal_estimate)
   update_prob_explore!(choice, tree)
   if nsolutions == 2315
     println("Explored ", str_from_word(choice.guess), " (",
@@ -273,7 +285,8 @@ function soonest_cached_exploratory_choice(tree::Tree, prob_optimal_is_not_cache
   # The visit frequency of the next non-cached choice is taken by dividing
   # the probability that any non-cached choice is optimal, by the number of
   # non-cached choices.
-  next_non_cached_choice_visit = tree.last_non_cache_visit + 1 / (prob_optimal_is_not_cached / (length(guesses) - length(tree.choices)))
+  #next_non_cached_choice_visit = tree.last_non_cache_visit + 1 / (prob_optimal_is_not_cached / (length(guesses) - length(tree.choices)))
+  next_non_cached_choice_visit = tree.last_non_cache_visit + 1 / prob_optimal_is_not_cached
   if next_non_cached_choice_visit < min_next_visit
     return best_non_cached_exploratory_choice(tree, guesses, solutions)
   end
@@ -309,14 +322,32 @@ function add_measurement!(choice::Choice, new_measurement::Float64, tree::Tree)
   tree.visits += 1
 end
 
+function update_tree_optimal_estimate!(choice::Choice, tree::Tree, new_tree_optimal_estimate::Float64)
+  old_tree_optimal_estimate = choice.tree_optimal_estimate
+  choice.tree_optimal_estimate = new_tree_optimal_estimate
+  squared_error = (new_tree_optimal_estimate - old_tree_optimal_estimate)^2
+  if choice.visits <= 1
+    choice.tree_optimal_estimate_variance = squared_error
+  else
+    new_tree_optimal_estimate_variance = ((
+        # Extract the average error
+        sqrt(choice.tree_optimal_estimate_variance * choice.visits)
+        # Update the error to the new mean
+        + old_tree_optimal_estimate - new_tree_optimal_estimate
+       )^2
+      + squared_error) / (choice.visits+1)
+    choice.tree_optimal_estimate_variance = new_tree_optimal_estimate_variance
+  end
+end
+
 # Improve estimate of the optimal number of guesses to win for a given choice.
-function update_optimal_estimate!(choice::Choice, tree::Tree, old_best_measured_yet::Float64)
+function update_optimal_estimate!(choice::Choice, tree::Tree, old_tree_optimal_estimate::Float64)
   # The theory is: the best measured guess count will exponentially improve
   # as more explorations are performed. It converges to the plateau where the
   # optimal guess count lies, with diminishing returns.
   # In order to approximate where the plateau is, we must compute estimated
   # parameters for the exponential curve.
-  diff_best_measured_now = choice.best_measured_yet - old_best_measured_yet
+  diff_best_measured_now = choice.tree_optimal_estimate - old_tree_optimal_estimate
   # The visits count includes the current exploration.
   if choice.visits == 2  # We want 2 real measurements.
     choice.init_diff_best_measured_yet = diff_best_measured_now
@@ -333,7 +364,12 @@ function update_optimal_estimate!(choice::Choice, tree::Tree, old_best_measured_
   if choice.init_diff_best_measured_yet != 0 && choice.current_diff_best_measured_yet != 0 && choice.init_diff_best_measured_yet != choice.current_diff_best_measured_yet && choice.visits > 1
     # yi = a + bc^i
     # => c = (y'i ÷ y'1)^(1/(i-1))
-    new_exp_base = (choice.current_diff_best_measured_yet / choice.init_diff_best_measured_yet)^(1/(choice.visits-1))
+    diff_quotient = choice.current_diff_best_measured_yet / choice.init_diff_best_measured_yet
+    new_exp_base = if diff_quotient < 0
+      0.0
+    else
+      diff_quotient^(1/(choice.visits-1))
+    end
     tree.exp_base = (tree.exp_base * tree.exp_count + new_exp_base) / (tree.exp_count+1)
     # => b = y'1 ÷ (c×log(c))
     new_exp_coeff = choice.init_diff_best_measured_yet / (tree.exp_base*log(tree.exp_base))
@@ -376,9 +412,9 @@ function estimate_optimal(choice::Choice, tree::Tree)::Float64
   if choice.visits == 0
     return choice.optimal_estimate
   end
-  new_optimal_estimate = choice.best_measured_yet - tree.exp_coeff*tree.exp_base^choice.visits
+  new_optimal_estimate = choice.tree_optimal_estimate - tree.exp_coeff*tree.exp_base^choice.visits
   if new_optimal_estimate < choice.best_measured_yet
-    new_optimal_estimate = choice.best_measured_yet + choice.current_diff_best_measured_yet
+    new_optimal_estimate = choice.best_measured_yet #+ choice.current_diff_best_measured_yet
   end
   return new_optimal_estimate
 end
@@ -548,6 +584,8 @@ function print_tree(tree::Tree)
   println("tree.prob_non_cached_optimal = ", tree.prob_non_cached_optimal)
   for c in tree.choices
     println(str_from_word(c.guess), " ", @sprintf("%.4f", -c.best_measured_yet),
+      "~", @sprintf("%.4f", -c.tree_optimal_estimate),
+      "±", @sprintf("%.4f", sqrt(c.tree_optimal_estimate_variance)),
       "~", @sprintf("%.4f", -c.optimal_estimate),
       "±", @sprintf("%.4f", sqrt(c.optimal_estimate_variance)),
       " o=", @sprintf("%.4f", c.prob_optimal / tree.sum_prob_optimal),
