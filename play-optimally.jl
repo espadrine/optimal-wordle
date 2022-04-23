@@ -691,10 +691,22 @@ end
 
 # Probability that exploring this choice will eventually yield an improvement.
 function prob_improvement(choice::Choice)::Float64
+  if choice.tree.nsolutions <= 1
+    return 0
+  end
   if choice.visits <= 0
     return 1
   end
-  return choice.last_improvement / choice.visits
+  historic_improvement = choice.last_improvement / choice.visits
+  if !isnothing(choice.constraints)
+    max_children = maximum(t -> if isnothing(t)
+      1
+    else
+      maximum(c -> c.prob_improvement, t.choices)
+    end, choice.constraints)
+    return min(max_children, historic_improvement)
+  end
+  return historic_improvement
 end
 
 function add_estimated_best_guess!(tree::Tree, guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}})::Choice
