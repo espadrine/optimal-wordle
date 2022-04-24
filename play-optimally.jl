@@ -813,8 +813,11 @@ end
 function choice_breadcrumb(choice::Choice)
   choices = str_from_word(choice.guess)
   while choice.tree.previous_choice != nothing
+    choices = @sprintf("%s %s %s",
+      str_from_word(choice.tree.previous_choice.guess),
+      str_from_constraints(choice.tree.constraint),
+      choices)
     choice = choice.tree.previous_choice
-    choices = @sprintf("%s %s", str_from_word(choice.guess), choices)
   end
   return choices
 end
@@ -875,6 +878,16 @@ function parse_constraints(template::String)::UInt8
   return constraints
 end
 
+template_constraint_chars = ".xo"
+function str_from_constraints(constraints::UInt8)::String
+  template = ""
+  for i in 1:5
+    template = string(template, template_constraint_chars[(constraints % 3) + 1])
+    constraints ÷= 3
+  end
+  return template
+end
+
 function match_constraints(word::Vector{UInt8}, guess::Vector{UInt8}, given_constraints::UInt8)::Bool
   return constraints(guess, word) == given_constraints
 end
@@ -917,6 +930,11 @@ function test()
 
   for test in constraint_tests
     @test constraints(Vector{UInt8}(test[1]), Vector{UInt8}(test[2])) == parse_constraints(test[3])
+  end
+
+  constraint_parsing_tests = ["xo..x", ".....", "oxxx."]
+  for test in constraint_parsing_tests
+    @test str_from_constraints(parse_constraints(test)) == test
   end
 end
 
