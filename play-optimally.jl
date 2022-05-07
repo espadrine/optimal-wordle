@@ -59,6 +59,9 @@ end
 mutable struct ConvergingMeasurementDifferentials
   visits::Int
   max_visits::Int  # Largest number of visits in ConvergingMeasurements.
+  # List of average diffs between each measurement per number of visits.
+  slopes::Vector{Float64}
+  slope_visits::Vector{Int}
   # Accuracy computation arises from the difference between the start and
   # converged measurement value.
   init_slope::Float64  # Average slope of the first half of the data points.
@@ -78,6 +81,8 @@ end
 function newConvergingMeasurementDifferentials()
   visits = 0
   max_visits = visits
+  slopes = []
+  slope_visits = []
   init_slope = 0
   exp_visits = visits
   exp_base = 0
@@ -86,7 +91,7 @@ function newConvergingMeasurementDifferentials()
   variance_visits = [0, 0]
   variance_coeff = 0
   variance_exp = 0
-  return ConvergingMeasurementDifferentials(visits, max_visits, init_slope, exp_visits, exp_base, exp_coeff, variance, variance_visits, variance_coeff, variance_exp)
+  return ConvergingMeasurementDifferentials(visits, max_visits, slopes, slope_visits, init_slope, exp_visits, exp_base, exp_coeff, variance, variance_visits, variance_coeff, variance_exp)
 end
 
 mutable struct ConvergingMeasurement
@@ -146,6 +151,15 @@ function update_differentials!(aggregate::ConvergingMeasurement, measured_diff::
     return
   end
   differentials = aggregate.differentials
+
+  # Update tree-wide slopes.
+  slope_visits = aggregate.visits - 1
+  if slope_visits > length(differentials.slopes)
+    push!(differentials.slopes, 0)
+    push!(differentials.slope_visits, 0)
+  end
+  differentials.slopes[slope_visits] = (differentials.slopes[slope_visits] * differentials.slope_visits[slope_visits] + measured_diff) / (differentials.slope_visits[slope_visits] + 1)
+  differentials.slope_visits[slope_visits] += 1
 
   # Exponential weighing of (½^i)÷2 to smooth the differential.
   # That way, the last weighs ½; the nearest 5th measurement still weighs >1%.
@@ -225,26 +239,14 @@ end
 
 function estimate_asymptote(aggregate::ConvergingMeasurement)::Float64
   differentials = aggregate.differentials
-  if differentials.exp_base <= 0
-    # We have no exponential base, and the current slope does not learn from
-    # other choices. So we use the init_slope.
-    # Lacking second derivatives, we assume that the slope halves after every
-    # visit. Thus the asymptote is first + Σ init_slope ÷ 2^i = first + 2×init_slope.
-    # We want it in terms of the latest measurement (for increased precision):
-    return aggregate.latest + 2 * differentials.init_slope / (2^(aggregate.visits-1))
+  # We compute the bias that measurements incur
+  # by summing the averaged diffs between each sequential measurement.
+  bias = 0
+  v = max(aggregate.visits, 1)
+  for i = v:differentials.max_visits-1
+    bias += differentials.slopes[i]
   end
-  # yi = a + bc^i => a = yi - bc^i
-  a = aggregate.current - differentials.exp_coeff*differentials.exp_base^aggregate.visits
-  if isinf(a)
-    return aggregate.latest + aggregate.current_slope
-  end
-  # If the base is above 1, the asymptote is at -∞ visits.
-  # The exponential regression diverges: to compare different choices,
-  # we look at the extrapolated value at the latest global visit count.
-  if differentials.exp_base >= 1
-    return a + differentials.exp_coeff*differentials.exp_base^differentials.max_visits
-  end
-  return a
+  return aggregate.latest + bias
 end
 
 function estimate_variance(aggregate::ConvergingMeasurement)::Float64
@@ -793,7 +795,7 @@ function prob_improvement(choice::Choice)::Float64
       1
     else
       #t.best_choice.prob_improvement
-      foldl((p, c) -> p + c.prob_improvement * c.prob_optimal, t.choices, init=0)  / t.sum_prob_optimal
+      foldl((p, c) -> p + c.prob_improvement * c.prob_beat_best, t.choices, init=0)  / t.sum_prob_beat_best
     end, choice.constraints)
     return min(max_children, historic_improvement)
   end
@@ -886,6 +888,7 @@ function print_tree(tree::Tree)
   println("tree.sum_prob_optimal = ", tree.sum_prob_optimal)
   println("tree.sum_prob_beat_best = ", tree.sum_prob_beat_best)
   println("tree.prob_non_cached_optimal = ", tree.prob_non_cached_optimal)
+  println("tree.differentials = ", tree.differentials.slopes[1:min(10, length(tree.differentials.slopes))])
   for c in tree.choices
     println(str_from_word(c.guess), " ", @sprintf("%.4f", -c.best_measured_yet),
       "~", @sprintf("%.4f", -c.measurement.latest),
