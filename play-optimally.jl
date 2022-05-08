@@ -183,27 +183,37 @@ function update_exponential_params!(aggregate::ConvergingMeasurement)
   end
   differentials = aggregate.differentials
 
+  # Slopes.
+  slope_0 = 0
+  slope_1 = 0
+  slope_count = length(differentials.slopes)
+  slope_mid = slope_count ÷ 2
+  for diff in differentials.slopes[1:slope_mid]
+    slope_0 += diff
+  end
+  for diff in differentials.slopes[slope_mid+1:slope_count]
+    slope_1 += diff
+  end
+
   # yi = a + bc^i
   # => c = (y'i ÷ y'0)^(1/i))
-  new_exp_base = if differentials.init_slope == 0
+  # => c = ((y[n]-y[n/2]) ÷ (y[n/2]-y[0]))^(2/n))
+  new_exp_base = if slope_0 == 0
     0.0
   else
-    diff_quotient = aggregate.current_slope / differentials.init_slope
+    diff_quotient = slope_1 / slope_0
     if diff_quotient < 0
       0.0
     else
-      diff_quotient^(1/aggregate.visits)
+      diff_quotient^(2/slope_count)
     end
   end
-  if new_exp_base <= 0.0 || new_exp_base >= 1.0
-    return  # Discard diverging data.
-  end
   differentials.exp_visits += 1
-  differentials.exp_base = (differentials.exp_base * (differentials.exp_visits-1) + new_exp_base) / differentials.exp_visits
+  differentials.exp_base = new_exp_base
 
   # => b = y'1 ÷ (c×log(c))
   new_exp_coeff = differentials.init_slope / (differentials.exp_base * log(differentials.exp_base))
-  differentials.exp_coeff = (differentials.exp_coeff * (differentials.exp_visits-1) + new_exp_coeff) / differentials.exp_visits
+  differentials.exp_coeff = new_exp_coeff
 end
 
 function update_asymptote!(aggregate::ConvergingMeasurement)
@@ -214,7 +224,6 @@ function update_asymptote!(aggregate::ConvergingMeasurement)
 
   for i = 1:2
     dvisits = differentials.variance_visits[i]
-    old_squared_error = (old_asymptote - aggregate.measurements[i])^2
     squared_error = (aggregate.asymptote - aggregate.measurements[i])^2
     if aggregate.visits == i  # First visit for this aggregate: we add the squared error.
       differentials.variance_visits[i] += 1
@@ -225,6 +234,7 @@ function update_asymptote!(aggregate::ConvergingMeasurement)
           + squared_error) / (dvisits+1)
       end
     elseif aggregate.visits > i  # Not the first visit: we substitute the squared error.
+      old_squared_error = (old_asymptote - aggregate.measurements[i])^2
       differentials.variance[i] = (differentials.variance[i] * dvisits
         - old_squared_error + squared_error) / dvisits
     end
@@ -239,14 +249,20 @@ end
 
 function estimate_asymptote(aggregate::ConvergingMeasurement)::Float64
   differentials = aggregate.differentials
-  # We compute the bias that measurements incur
-  # by summing the averaged diffs between each sequential measurement.
-  bias = 0
-  v = max(aggregate.visits, 1)
-  for i = v:differentials.max_visits-1
-    bias += differentials.slopes[i]
+  # yi = a + bc^i => a = yi - bc^i
+  a = aggregate.current - differentials.exp_coeff*differentials.exp_base^aggregate.visits
+  if differentials.exp_base <= 0 || differentials.exp_base >= 1 || isinf(a) || isnan(a)
+    # We have no exponential base, and the regression has a diverging asymptote.
+    # So we merely compute the bias that measurements incur
+    # by summing the averaged diffs between each sequential measurement.
+    bias = 0
+    v = max(aggregate.visits, 1)
+    for i = v:differentials.max_visits-1
+      bias += differentials.slopes[i]
+    end
+    return aggregate.latest + bias
   end
-  return aggregate.latest + bias
+  return a
 end
 
 function estimate_variance(aggregate::ConvergingMeasurement)::Float64
@@ -476,8 +492,7 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
   #old_best_measured_yet = choice.best_measured_yet
   #old_tree_optimal_estimate = choice.tree_optimal_estimate
   add_measurement!(choice, new_guesses_remaining, tree)
-  update_tree_optimal_estimate!(choice, tree, new_tree_optimal_estimate)
-  #update_optimal_estimate!(choice, tree, old_tree_optimal_estimate)
+  update_optimal_estimate!(choice, new_tree_optimal_estimate)
   update_prob_explore!(tree)
   if nsolutions == 2315
     println("Explored ", str_from_word(choice.guess), " (",
@@ -607,103 +622,9 @@ function add_measurement!(choice::Choice, new_measurement::Float64, tree::Tree)
   tree.visits += 1
 end
 
-function update_tree_optimal_estimate!(choice::Choice, tree::Tree, new_tree_optimal_estimate::Float64)
+function update_optimal_estimate!(choice::Choice, new_tree_optimal_estimate::Float64)
   add_measurement!(choice.measurement, new_tree_optimal_estimate)
-  #old_tree_optimal_estimate = choice.tree_optimal_estimate
-  #choice.tree_optimal_estimate = new_tree_optimal_estimate
-  #squared_error = (new_tree_optimal_estimate - old_tree_optimal_estimate)^2
-  #if choice.visits <= 1
-  #  choice.tree_optimal_estimate_variance = squared_error
-  #else
-  #  new_tree_optimal_estimate_variance = ((
-  #      # Extract the average error
-  #      sqrt(choice.tree_optimal_estimate_variance * choice.visits)
-  #      # Update the error to the new mean
-  #      + old_tree_optimal_estimate - new_tree_optimal_estimate
-  #     )^2
-  #    + squared_error) / (choice.visits+1)
-  #  choice.tree_optimal_estimate_variance = new_tree_optimal_estimate_variance
-  #end
 end
-
-# Improve estimate of the optimal number of guesses to win for a given choice.
-#function update_optimal_estimate!(choice::Choice, tree::Tree, old_tree_optimal_estimate::Float64)
-#  # The theory is: the best measured guess count will exponentially improve
-#  # as more explorations are performed. It converges to the plateau where the
-#  # optimal guess count lies, with diminishing returns.
-#  # In order to approximate where the plateau is, we must compute estimated
-#  # parameters for the exponential curve.
-#  diff_best_measured_now = choice.tree_optimal_estimate - old_tree_optimal_estimate
-#  # The visits count includes the current exploration.
-#  if choice.visits == 2  # We want 2 real measurements.
-#    choice.init_diff_best_measured_yet = diff_best_measured_now
-#    choice.current_diff_best_measured_yet = diff_best_measured_now
-#  elseif choice.visits > 2
-#    # Exponential weighing of (½^i)÷2 to smooth the differential.
-#    # That way, the last weighs ½; the nearest 5th measurement still weighs >1%.
-#    choice.current_diff_best_measured_yet = (choice.current_diff_best_measured_yet + diff_best_measured_now) / 2
-#    # Same, but the first weighs ½: note that Π[i≥1] 2^-(2^-i) → ½
-#    factor = 2.0^-(2.0^-choice.visits)
-#    choice.init_diff_best_measured_yet = choice.init_diff_best_measured_yet * factor + diff_best_measured_now * (1-factor)
-#  end
-#
-#  if choice.init_diff_best_measured_yet != 0 && choice.current_diff_best_measured_yet != 0 && choice.init_diff_best_measured_yet != choice.current_diff_best_measured_yet && choice.visits > 1
-#    # yi = a + bc^i
-#    # => c = (y'i ÷ y'1)^(1/(i-1))
-#    diff_quotient = choice.current_diff_best_measured_yet / choice.init_diff_best_measured_yet
-#    new_exp_base = if diff_quotient < 0
-#      0.0
-#    else
-#      diff_quotient^(1/(choice.visits-1))
-#    end
-#    tree.exp_base = (tree.exp_base * tree.exp_count + new_exp_base) / (tree.exp_count+1)
-#    # => b = y'1 ÷ (c×log(c))
-#    new_exp_coeff = choice.init_diff_best_measured_yet / (tree.exp_base*log(tree.exp_base))
-#    tree.exp_coeff = (tree.exp_coeff * tree.exp_count + new_exp_coeff) / (tree.exp_count+1)
-#    tree.exp_count += 1
-#    #if isnothing(tree.previous_choice)
-#    #  print(" diff=", @sprintf("%.4f", diff_best_measured_now), " init=", @sprintf("%.4f", choice.init_diff_best_measured_yet), " current=", @sprintf("%.4f", choice.current_diff_best_measured_yet), " base:", @sprintf("%.4f", tree.exp_base), " coeff:", @sprintf("%.4f", tree.exp_coeff), " ")
-#    #end
-#  end
-#
-#  # => a = yi - bc^i
-#  new_optimal_estimate = estimate_optimal(choice, tree)
-#  old_optimal_estimate = choice.optimal_estimate
-#  choice.optimal_estimate = new_optimal_estimate
-#
-#  # Update the choice’s optimal estimate variance.
-#  choice_squared_error = (new_optimal_estimate - old_optimal_estimate)^2
-#  if choice.visits <= 1
-#    # FIXME: We are including the visitless estimation in our variance estimate.
-#    # However, melding the variance of two estimation sources is invalid,
-#    # as each source has a separate, incompatible uncertainty arising from its
-#    # distinct algorithm. Thus the variance of the visitless estimate should
-#    # be unaffected by the variance of the measurement estiamtes
-#    # (and, when we implement them, of the recursive value estimates).
-#    choice.optimal_estimate_variance = choice_squared_error
-#  else
-#    old_choice_optimal_estimate_variance = choice.optimal_estimate_variance
-#    new_choice_optimal_estimate_variance = ((
-#        # Extract the average error
-#        sqrt(choice.optimal_estimate_variance * choice.visits)
-#        # Update the error to the new mean
-#        + old_optimal_estimate - choice.optimal_estimate
-#       )^2
-#      + choice_squared_error) / (choice.visits+1)
-#    choice.optimal_estimate_variance = new_choice_optimal_estimate_variance
-#  end
-#end
-
-#function estimate_optimal(choice::Choice, tree::Tree)::Float64
-#  if choice.visits == 0
-#    return choice.optimal_estimate
-#  end
-#  new_optimal_estimate = choice.tree_optimal_estimate - tree.exp_coeff*tree.exp_base^choice.visits
-#  if new_optimal_estimate < choice.best_measured_yet
-#    new_optimal_estimate = choice.best_measured_yet #+ choice.current_diff_best_measured_yet
-#  end
-#  return new_optimal_estimate
-#end
 
 # The likelihood that we pick a choice is its worthiness:
 # the odds that it is optimal and that its exploration improves its score.
