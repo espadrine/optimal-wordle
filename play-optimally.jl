@@ -15,13 +15,13 @@ function main()
   while length(remaining_solutions) > 1
     step = 0
     if length(remaining_solutions) == 2315
-      @time while tree.best_choice.best_measured_yet < -3.4212
+      @time while tree.best_choice.best_lower_bound < -3.4212
         improve!(tree, remaining_solutions, allowed_guesses)
         step += 1
 
         choice = tree.best_choice
         print("We suggest ", str_from_word(choice.guess), " (",
-                @sprintf("%.4f", -choice.best_measured_yet), "~",
+                @sprintf("%.4f", -choice.best_lower_bound), "~",
                 @sprintf("%.4f", -choice.measurement.asymptote),
                 "[mse=", @sprintf("%.5f", salet_accuracy), "];",
                 @sprintf("s=%d%%", round(choice.prob_beat_best * 100)), ")",
@@ -35,7 +35,7 @@ function main()
         choice = tree.best_choice
         print(ANSI_RESET_LINE)
         print("We suggest ", str_from_word(choice.guess), " (",
-                @sprintf("%.4f", -choice.best_measured_yet), "~",
+                @sprintf("%.4f", -choice.best_lower_bound), "~",
                 @sprintf("%.4f", -choice.measurement.asymptote), ";",
                 @sprintf("s=%d%%", round(choice.prob_beat_best * 100)), ")",
                 " step ", step, ". ")
@@ -219,7 +219,6 @@ end
 function update_asymptote!(aggregate::ConvergingMeasurement)
   old_asymptote = aggregate.asymptote
   aggregate.asymptote = estimate_asymptote(aggregate)
-  aggregate.variance = estimate_variance(aggregate)
   differentials = aggregate.differentials
 
   for i = 1:2
@@ -245,6 +244,7 @@ function update_asymptote!(aggregate::ConvergingMeasurement)
     differentials.variance_coeff = differentials.variance[1]
     differentials.variance_exp = log2(differentials.variance[2] / differentials.variance_coeff)
   end
+  aggregate.variance = estimate_variance(aggregate)
 end
 
 function estimate_asymptote(aggregate::ConvergingMeasurement)::Float64
@@ -266,6 +266,9 @@ function estimate_asymptote(aggregate::ConvergingMeasurement)::Float64
 end
 
 function estimate_variance(aggregate::ConvergingMeasurement)::Float64
+  if aggregate.differentials.variance_coeff == 0
+    return aggregate.differentials.variance[1]
+  end
   return aggregate.differentials.variance_coeff * aggregate.visits ^ aggregate.differentials.variance_exp
 end
 
@@ -295,15 +298,8 @@ mutable struct Choice
   guess::Vector{UInt8}
 
   # Including this guess, how many guesses until the win using the current best
-  # policy. It is always an upper bound for the optimal value.
-  best_measured_yet::Float64
-  tree_optimal_estimate::Float64
-  tree_optimal_estimate_variance::Float64
-  # Estimated slope of measurement to estimate the optimal.
-  init_diff_best_measured_yet::Float64    # Diff at 0 visits
-  current_diff_best_measured_yet::Float64 # Diff at the current visit
-  optimal_estimate::Float64
-  optimal_estimate_variance::Float64
+  # policy. It is always a lower bound for the optimal value.
+  best_lower_bound::Float64
 
   # The following probabilities are local estimations;
   # they must be divided by sum_prob_optimal etc. to be coherent.
@@ -314,7 +310,6 @@ mutable struct Choice
   # We link it lazily to the next choice we make in the tree search.
   visits::Int
   last_visit::Int  # Number of tree visits during last exploration.
-  last_improvement::Int  # Number of explorations until last improved best.
 
   measurement::ConvergingMeasurement
 
@@ -327,17 +322,14 @@ mutable struct Tree
   choices::Vector{Choice}
   choice_from_guess::Dict{Vector{UInt8}, Choice}
   best_choice::Union{Choice, Nothing}
+  # Best known choice based on the known lower bound explored.
+  best_choice_lower_bound::Union{Choice, Nothing}
   nsolutions::Int
   visits::Int
   sum_prob_optimal::Float64
   sum_prob_beat_best::Float64
   prob_non_cached_optimal::Float64
   last_non_cache_visit::Int  # Visit count when we last included a guess in the list of choices.
-  # For optimal estimate computation:
-  # best_measured_yet = optimal_estimate + exp_coeff × exp_base^visits
-  exp_base::Float64
-  exp_coeff::Float64
-  exp_count::Int
   differentials::ConvergingMeasurementDifferentials
 end
 
@@ -347,38 +339,30 @@ function newChoice(guess::Vector{UInt8})::Choice
   add_measurement!(measurement, optimal_estimate)
 
   tree = nothing
-  best_measured_yet = -1
-  tree_optimal_estimate = -1
-  tree_optimal_estimate_variance = 0
-  init_diff_best_measured_yet = 0
-  current_diff_best_measured_yet = 0
-  optimal_estimate_variance = 0
+  best_lower_bound = -1
   prob_optimal = 1
   prob_improvement = 0
   prob_beat_best = 0
   visits = 0
   last_visit = -1
-  last_improvement = 0
   constraints = nothing
-  Choice(tree, guess, best_measured_yet, tree_optimal_estimate, tree_optimal_estimate_variance, init_diff_best_measured_yet, current_diff_best_measured_yet, optimal_estimate, optimal_estimate_variance, prob_optimal, prob_improvement, prob_beat_best, visits, last_visit, last_improvement, measurement, constraints)
+  Choice(tree, guess, best_lower_bound, prob_optimal, prob_improvement, prob_beat_best, visits, last_visit, measurement, constraints)
 end
 
 function newChoice(guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}}, optimal_estimate::Float64, optimal_estimate_variance::Float64, differentials::ConvergingMeasurementDifferentials)::Choice
   measurement = newConvergingMeasurement(differentials)
+  measurement.variance = optimal_estimate_variance
   add_measurement!(measurement, optimal_estimate)
 
   tree = nothing
   nsols = Float64(length(solutions))
-  init_diff_best_measured_yet = 0
-  current_diff_best_measured_yet = 0
   prob_optimal = 1
   prob_improvement = 1
   prob_beat_best = 1
   visits = 0
   last_visit = -1
-  last_improvement = 0
   constraints = nothing
-  Choice(tree, guess, -nsols, optimal_estimate, optimal_estimate_variance, init_diff_best_measured_yet, current_diff_best_measured_yet, optimal_estimate, optimal_estimate_variance, prob_optimal, prob_improvement, prob_beat_best, visits, last_visit, last_improvement, measurement, constraints)
+  Choice(tree, guess, -nsols, prob_optimal, prob_improvement, prob_beat_best, visits, last_visit, measurement, constraints)
 end
 
 function newTree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}}, previous_choice::Union{Choice, Nothing}, constraint::UInt8)::Tree
@@ -386,15 +370,13 @@ function newTree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}
   if nsols == 1
     choice = newChoice(solutions[1])
     best_choice = choice
+    best_choice_lower_bound = choice
     visits = 0
     sum_prob_optimal = choice.prob_optimal
     sum_prob_beat_best = choice.prob_beat_best
     prob_non_cached_optimal = 0
     last_non_cache_visit = -1
-    exp_base = 0
-    exp_coeff = 0
-    exp_count = 0
-    tree = Tree(previous_choice, constraint, [choice], Dict([(choice.guess, choice)]), best_choice, nsols, visits, sum_prob_optimal, sum_prob_beat_best, prob_non_cached_optimal, last_non_cache_visit, exp_base, exp_coeff, exp_count, choice.measurement.differentials)
+    tree = Tree(previous_choice, constraint, [choice], Dict([(choice.guess, choice)]), best_choice, best_choice_lower_bound, nsols, visits, sum_prob_optimal, sum_prob_beat_best, prob_non_cached_optimal, last_non_cache_visit, choice.measurement.differentials)
     choice.tree = tree
     return tree
   end
@@ -404,14 +386,12 @@ function newTree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}
   sum_prob_beat_best = 0
   prob_non_cached_optimal = 1
   last_non_cache_visit = -1
-  exp_base = 0
-  exp_coeff = 0
-  exp_count = 0
-  tree = Tree(previous_choice, constraint, [], Dict{Vector{UInt8}, Choice}(), nothing, nsols, visits, sum_prob_optimal, sum_prob_beat_best, prob_non_cached_optimal, last_non_cache_visit, exp_base, exp_coeff, exp_count, newConvergingMeasurementDifferentials())
+  tree = Tree(previous_choice, constraint, [], Dict{Vector{UInt8}, Choice}(), nothing, nothing, nsols, visits, sum_prob_optimal, sum_prob_beat_best, prob_non_cached_optimal, last_non_cache_visit, newConvergingMeasurementDifferentials())
   tree.best_choice = add_estimated_best_guess!(tree, guesses, solutions)
+  tree.best_choice_lower_bound = tree.best_choice
   for choice in tree.choices
     choice.tree = tree
-    choice.prob_optimal = prob_optimal_choice(choice.optimal_estimate, choice.optimal_estimate_variance, tree)
+    choice.prob_optimal = prob_optimal_choice(choice.measurement.asymptote, choice.measurement.variance, tree)
     tree.sum_prob_optimal += choice.prob_optimal
   end
   tree.sum_prob_optimal += tree.prob_non_cached_optimal
@@ -478,8 +458,16 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
     else
       improve!(subtree, remaining_solutions, guesses)
     end
+
+    # Full-depth:
+    #if isnothing(subtree)        # Initialize the next move.
+    #  subtree = newTree(guesses, remaining_solutions, choice, constraint)
+    #  choice.constraints[constraint + 1] = subtree
+    #end
+    #improve!(subtree, remaining_solutions, guesses)
+
     # For each solution, we made one guess, on top of the guesses left to end the game.
-    best_guesses_to_win += (subtree.best_choice.best_measured_yet - 1) * nrsols
+    best_guesses_to_win += (subtree.best_choice.best_lower_bound - 1) * nrsols
     # FIXME: we should not use the most optimistic estimate,
     # but the expected estimate,
     # by weighing each asymptote by the probability that it is optimal.
@@ -489,31 +477,28 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
   # Update information about the current best policy.
   new_guesses_remaining = best_guesses_to_win / nsolutions
   new_tree_optimal_estimate /= nsolutions
-  #old_best_measured_yet = choice.best_measured_yet
-  #old_tree_optimal_estimate = choice.tree_optimal_estimate
-  add_measurement!(choice, new_guesses_remaining, tree)
-  update_optimal_estimate!(choice, new_tree_optimal_estimate)
+  add_measurement!(choice, new_tree_optimal_estimate, new_guesses_remaining)
   update_prob_explore!(tree)
+  println("Explored ", choice_breadcrumb(choice), ": ", nsolutions, " sols (",
+          @sprintf("%.4f", -choice.best_lower_bound), "~",
+          @sprintf("%.4f", -init_measurement_latest), "→",
+          @sprintf("%.4f", -choice.measurement.latest), "∞→",
+          @sprintf("%.4f", -choice.measurement.asymptote), "±",
+          @sprintf("%.4f", sqrt(choice.measurement.variance)), ";",
+          @sprintf("e=%d%%", round(init_prob_explore * 100)), "→",
+          @sprintf("%d%%", round(choice.prob_beat_best / tree.sum_prob_beat_best * 100)), ";",
+          @sprintf("o=%d%%", round(choice.prob_optimal / tree.sum_prob_optimal * 100)), ";",
+          @sprintf("i=%d%%", round(choice.prob_improvement * 100)), ";",
+          " visits ", choice.visits, ")")
   if nsolutions == 2315
-    println("Explored ", str_from_word(choice.guess), " (",
-            @sprintf("%.4f", -choice.best_measured_yet), "~",
-            @sprintf("%.4f", -init_measurement_latest), "→",
-            @sprintf("%.4f", -choice.measurement.latest), "∞→",
-            @sprintf("%.4f", -choice.measurement.asymptote), "±",
-            @sprintf("%.4f", sqrt(choice.measurement.variance)), ";",
-            @sprintf("e=%d%%", round(init_prob_explore * 100)), "→",
-            @sprintf("%d%%", round(choice.prob_beat_best / tree.sum_prob_beat_best * 100)), ";",
-            @sprintf("o=%d%%", round(choice.prob_optimal / tree.sum_prob_optimal * 100)), ";",
-            @sprintf("i=%d%%", round(choice.prob_improvement * 100)), ";",
-            " visits ", choice.visits, ")")
     println("After exploration: ", string(choice.measurement))
     println()
     if str_from_word(choice.guess) == "salet" && salet_accuracy_count < 100
-      global salet_accuracy = ((salet_accuracy * salet_accuracy_count) + (choice.optimal_estimate - -3.4212)^2) / (salet_accuracy_count+1)
+      global salet_accuracy = ((salet_accuracy * salet_accuracy_count) + (choice.measurement.asymptote - -3.4212)^2) / (salet_accuracy_count+1)
       global salet_accuracy_count += 1
     end
   end
-  return choice.best_measured_yet
+  return choice.best_lower_bound
 end
 
 function best_exploratory_choice_with_ordering!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Choice
@@ -596,23 +581,33 @@ function soonest_cached_exploratory_choice(tree::Tree, prob_optimal_is_not_cache
   return min_choice, min_idx
 end
 
-function add_measurement!(choice::Choice, new_measurement::Float64, tree::Tree)
-  if new_measurement > choice.best_measured_yet
-    choice.best_measured_yet = new_measurement
-    choice.last_improvement = choice.visits + 1
-  end
-  if choice.best_measured_yet > tree.best_choice.best_measured_yet
-    println("Improvement found: ", choice_breadcrumb(choice), " ", tree.best_choice.best_measured_yet, "→", choice.best_measured_yet)
+function add_measurement!(choice::Choice, new_measurement::Float64, new_lower_bound::Float64)
+  tree = choice.tree
+
+  add_measurement!(choice.measurement, new_measurement)
+
+  if choice.measurement.asymptote > tree.best_choice.measurement.asymptote
     tree.best_choice = choice
   end
 
+  if new_lower_bound > choice.best_lower_bound
+    choice.best_lower_bound = new_lower_bound
+  end
+  if choice.best_lower_bound > tree.best_choice.best_lower_bound
+    println("Improvement found: ", choice_breadcrumb(choice), " ",
+            @sprintf("%.4f", tree.best_choice.best_lower_bound), "→",
+            @sprintf("%.4f", choice.best_lower_bound),
+            " (", tree.nsolutions, " sols)")
+    tree.best_choice_lower_bound = choice
+  end
+
   # Recursive constant:
-  # tree.best_choice.best_measured_yet matches all recursive best choices.
+  # tree.best_choice.best_lower_bound matches all recursive best choices.
   # We verify it through assertion testing.
   #if nsolutions == 2315
   #  total = total_guesses_for_all_sols(tree, guesses, solutions)
-  #  if abs(tree.best_choice.best_measured_yet - total / nsolutions) > 0.01
-  #    println("Total guesses: ", total, "; tree best choice guesses: ", tree.best_choice.best_measured_yet)
+  #  if abs(tree.best_choice.best_lower_bound - total / nsolutions) > 0.01
+  #    println("Total guesses: ", total, "; tree best choice guesses: ", tree.best_choice.best_lower_bound)
   #  end
   #end
 
@@ -622,21 +617,15 @@ function add_measurement!(choice::Choice, new_measurement::Float64, tree::Tree)
   tree.visits += 1
 end
 
-function update_optimal_estimate!(choice::Choice, new_tree_optimal_estimate::Float64)
-  add_measurement!(choice.measurement, new_tree_optimal_estimate)
-end
-
 # The likelihood that we pick a choice is its worthiness:
 # the odds that it is optimal and that its exploration improves its score.
 function update_prob_explore!(tree::Tree)
   for c in tree.choices
     c.measurement.asymptote = estimate_asymptote(c.measurement)
     c.measurement.variance = estimate_variance(c.measurement)
-    #c.optimal_estimate = estimate_optimal(c, tree)
   end
   sum_prob_optimal = 0
   for c in tree.choices
-    #c.prob_optimal = prob_optimal_choice(c.optimal_estimate, c.optimal_estimate_variance, tree)
     c.prob_optimal = prob_optimal_choice(c.measurement.asymptote, c.measurement.variance, tree)
     sum_prob_optimal += c.prob_optimal
   end
@@ -667,7 +656,6 @@ function prob_optimal_choice(optimal_estimate::Float64, optimal_estimate_varianc
 end
 
 function prob_superior_choice(optimal_estimate::Float64, optimal_estimate_variance::Float64, other::Choice)::Float64
-  #diff_variance = optimal_estimate_variance + other.optimal_estimate_variance
   diff_variance = optimal_estimate_variance + other.measurement.variance
   if diff_variance == 0
     return 1
@@ -675,7 +663,6 @@ function prob_superior_choice(optimal_estimate::Float64, optimal_estimate_varian
   # We now pretend the difference between this choice’s distribution
   # and the best choice’s is logistic.
   choice_mu = optimal_estimate  # We consider it to be the mode of its Gumbel.
-  #other_mu = other.optimal_estimate
   other_mu = other.measurement.asymptote
   return 1 - 1 / (1 + exp(-(0-(choice_mu-other_mu))/(sqrt(3*diff_variance)/pi)))
 end
@@ -687,7 +674,7 @@ function prob_choice_reaching_optimal(optimal_estimate::Float64, optimal_estimat
   optimum = if isnothing(tree.best_choice)
     optimal_estimate
   else
-    tree.best_choice.optimal_estimate
+    tree.best_choice.measurement.asymptote
   end
   # We assume that optimal estimates follow a Gumbel distribution,
   # since it is the maximum of a set of current-best-measurements
@@ -707,20 +694,21 @@ function prob_improvement(choice::Choice)::Float64
   if choice.tree.nsolutions <= 1
     return 0
   end
-  if choice.visits <= 0
-    return 1
-  end
-  historic_improvement = choice.last_improvement / choice.visits
+  #if choice.visits <= 0
+  #  return 1
+  #end
+  #historic_improvement = choice.last_improvement / choice.visits
   if !isnothing(choice.constraints)
     max_children = maximum(t -> if isnothing(t)
       1
     else
-      #t.best_choice.prob_improvement
       foldl((p, c) -> p + c.prob_improvement * c.prob_beat_best, t.choices, init=0)  / t.sum_prob_beat_best
     end, choice.constraints)
-    return min(max_children, historic_improvement)
+    return max_children
+    #return min(max_children, historic_improvement)
   end
-  return historic_improvement
+  return 1
+  #return historic_improvement
 end
 
 function add_estimated_best_guess!(tree::Tree, guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}})::Choice
@@ -728,8 +716,6 @@ function add_estimated_best_guess!(tree::Tree, guesses::Vector{Vector{UInt8}}, s
   choice_estimates = Vector{Float64}(undef, nguesses)
   best_guess = guesses[1]
   best_optimal_estimate = -Inf
-  second_best_guess = guesses[2]
-  second_best_optimal_estimate = -Inf
   optimal_estimate_mean = 0
   for (i, guess) in enumerate(guesses)
     if !isnothing(tree) && haskey(tree.choice_from_guess, guess)
@@ -742,8 +728,6 @@ function add_estimated_best_guess!(tree::Tree, guesses::Vector{Vector{UInt8}}, s
     @inbounds choice_estimates[i] = optimal_estimate
     optimal_estimate_mean += optimal_estimate
     if optimal_estimate > best_optimal_estimate
-      second_best_guess = best_guess
-      second_best_optimal_estimate = best_optimal_estimate
       best_guess = guess
       best_optimal_estimate = optimal_estimate
     end
@@ -809,9 +793,9 @@ function print_tree(tree::Tree)
   println("tree.sum_prob_optimal = ", tree.sum_prob_optimal)
   println("tree.sum_prob_beat_best = ", tree.sum_prob_beat_best)
   println("tree.prob_non_cached_optimal = ", tree.prob_non_cached_optimal)
-  println("tree.differentials = ", tree.differentials.slopes[1:min(10, length(tree.differentials.slopes))])
+  println("tree.differentials = ", join(map(s -> @sprintf("%.3f", s), tree.differentials.slopes[1:min(10, length(tree.differentials.slopes))]), ", "))
   for c in tree.choices
-    println(str_from_word(c.guess), " ", @sprintf("%.4f", -c.best_measured_yet),
+    println(str_from_word(c.guess), " ", @sprintf("%.4f", -c.best_lower_bound),
       "~", @sprintf("%.4f", -c.measurement.latest),
       "→", @sprintf("%.4f", -c.measurement.asymptote),
       "±", @sprintf("%.4f", sqrt(c.measurement.variance)),
