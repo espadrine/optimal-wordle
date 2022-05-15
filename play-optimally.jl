@@ -67,7 +67,6 @@ mutable struct ConvergingMeasurementDifferentials
   init_slope::Float64  # Average slope of the first half of the data points.
   # Parameters for an exponential convergence:
   # estimated_measurement(visits) = asymptote + exp_coeff × exp_base^visits
-  exp_visits::Int
   exp_base::Float64
   exp_coeff::Float64
   # Precision of the asymptote on the first three visits.
@@ -84,14 +83,13 @@ function newConvergingMeasurementDifferentials()
   slopes = []
   slope_visits = []
   init_slope = 0
-  exp_visits = visits
   exp_base = 0
   exp_coeff = 0
   variance = [0, 0]
   variance_visits = [0, 0]
   variance_coeff = 0
   variance_exp = 0
-  return ConvergingMeasurementDifferentials(visits, max_visits, slopes, slope_visits, init_slope, exp_visits, exp_base, exp_coeff, variance, variance_visits, variance_coeff, variance_exp)
+  return ConvergingMeasurementDifferentials(visits, max_visits, slopes, slope_visits, init_slope, exp_base, exp_coeff, variance, variance_visits, variance_coeff, variance_exp)
 end
 
 mutable struct ConvergingMeasurement
@@ -208,8 +206,10 @@ function update_exponential_params!(aggregate::ConvergingMeasurement)
       diff_quotient^(2/slope_count)
     end
   end
-  differentials.exp_visits += 1
   differentials.exp_base = new_exp_base
+  if differentials.exp_base <= 0 || differentials.exp_base >= 1
+    return
+  end
 
   # => b = y'1 ÷ (c×log(c))
   new_exp_coeff = differentials.init_slope / (differentials.exp_base * log(differentials.exp_base))
@@ -285,7 +285,6 @@ function string(aggregate::ConvergingMeasurement)::String
     " init_slope=", @sprintf("%.4f", differentials.init_slope),
     " exp_base=", @sprintf("%.4f", differentials.exp_base),
     " exp_coeff=", @sprintf("%.4f", differentials.exp_coeff),
-    " expv=", @sprintf("%d", differentials.exp_visits),
     " maxv=", @sprintf("%d", differentials.max_visits),
     " dv=", @sprintf("%d", differentials.visits),
     " dvar=", @sprintf("[%.4f, %.4f]", differentials.variance[1], differentials.variance[2]),
@@ -593,7 +592,7 @@ function add_measurement!(choice::Choice, new_measurement::Float64, new_lower_bo
   if new_lower_bound > choice.best_lower_bound
     choice.best_lower_bound = new_lower_bound
   end
-  if choice.best_lower_bound > tree.best_choice.best_lower_bound
+  if choice.best_lower_bound > tree.best_choice_lower_bound.best_lower_bound
     println("Improvement found: ", choice_breadcrumb(choice), " ",
             @sprintf("%.4f", tree.best_choice.best_lower_bound), "→",
             @sprintf("%.4f", choice.best_lower_bound),
@@ -691,24 +690,50 @@ end
 
 # Probability that exploring this choice will eventually yield an improvement.
 function prob_improvement(choice::Choice)::Float64
-  if choice.tree.nsolutions <= 1
-    return 0
-  end
-  #if choice.visits <= 0
-  #  return 1
-  #end
-  #historic_improvement = choice.last_improvement / choice.visits
-  if !isnothing(choice.constraints)
-    max_children = maximum(t -> if isnothing(t)
-      1
+  if isnothing(choice.constraints)
+    # Lacking children information, we compute the probability that the
+    # asymptote is actually the lower bound (given the asymptote's imprecision),
+    # which would mean it no longer improves.
+    return 1 - gumbel_pdf(choice.measurement.asymptote, choice.measurement.variance, choice.best_lower_bound)
+  else
+    # Recursive computation: it is the probability that each subtree achieves an
+    # improvement, weighed by the probability that that subtree is explored.
+    # - Constraint subtrees are weighted by the number of solutions, since each
+    #   subtree corresponding to one constraint result, will be explored in
+    #   proportion to the number of solutions that match it.
+    # - Choices are weighed by prob_beat_best, as that is the exploration
+    #   probability.
+    sum_subtree_weights = choice.tree.nsolutions
+    return foldl((p, t) -> p + if isnothing(t)
+      0
     else
-      foldl((p, c) -> p + c.prob_improvement * c.prob_beat_best, t.choices, init=0)  / t.sum_prob_beat_best
-    end, choice.constraints)
-    return max_children
-    #return min(max_children, historic_improvement)
+      subtree_weight = t.nsolutions
+      sum_choice_weights = t.sum_prob_beat_best
+      subtree_prob = (foldl(
+        (p, c) -> p + c.prob_improvement * c.prob_beat_best,
+        t.choices,
+        init=0
+       ) + 1 * t.prob_non_cached_optimal / t.sum_prob_optimal) / sum_choice_weights
+      subtree_weight * subtree_prob
+    end, choice.constraints, init=0) / sum_subtree_weights
   end
-  return 1
-  #return historic_improvement
+end
+
+function gumbel_pdf(mode, variance, value)
+  if variance == 0
+    if value == mode
+      return 1  # The PDF spikes at the mode.
+    else
+      return 0
+    end
+  end
+  beta = sqrt(variance * 6 / pi^2)
+  z = (value - mode) / beta
+  p = exp(-(z + exp(-z))) / beta
+  if p > 1
+    return 1
+  end
+  return p
 end
 
 function add_estimated_best_guess!(tree::Tree, guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}})::Choice
