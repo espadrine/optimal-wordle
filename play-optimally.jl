@@ -140,7 +140,7 @@ function add_measurement!(aggregate::ConvergingMeasurement, new_measurement::Flo
   end
 
   update_differentials!(aggregate, new_measurement - old_measurement)
-  update_exponential_params!(aggregate)
+  #update_exponential_params!(aggregate)
   update_asymptote!(aggregate)
 end
 
@@ -248,21 +248,26 @@ function update_asymptote!(aggregate::ConvergingMeasurement)
 end
 
 function estimate_asymptote(aggregate::ConvergingMeasurement)::Float64
+  return estimate_asymptote_from_bias(aggregate)
+end
+
+# Estimate the measured asymptote from exponential regression.
+function estimate_asymptote_from_exp_reg(aggregate::ConvergingMeasurement)::Float64
   differentials = aggregate.differentials
   # yi = a + bc^i => a = yi - bc^i
-  a = aggregate.current - differentials.exp_coeff*differentials.exp_base^aggregate.visits
-  if differentials.exp_base <= 0 || differentials.exp_base >= 1 || isinf(a) || isnan(a)
-    # We have no exponential base, and the regression has a diverging asymptote.
-    # So we merely compute the bias that measurements incur
-    # by summing the averaged diffs between each sequential measurement.
-    bias = 0
-    v = max(aggregate.visits, 1)
-    for i = v:differentials.max_visits-1
-      bias += differentials.slopes[i]
-    end
-    return aggregate.latest + bias
+  return aggregate.current - differentials.exp_coeff*differentials.exp_base^aggregate.visits
+end
+
+# Compute the bias that measurements incur by summing the averaged diffs between
+# each sequential measurement.
+function estimate_asymptote_from_bias(aggregate::ConvergingMeasurement)::Float64
+  differentials = aggregate.differentials
+  bias = 0
+  v = max(aggregate.visits, 1)
+  for i = v:differentials.max_visits-1
+    bias += differentials.slopes[i]
   end
-  return a
+  return aggregate.latest + bias
 end
 
 function estimate_variance(aggregate::ConvergingMeasurement)::Float64
