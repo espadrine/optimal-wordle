@@ -697,9 +697,9 @@ end
 function prob_improvement(choice::Choice)::Float64
   if isnothing(choice.constraints)
     # Lacking children information, we compute the probability that the
-    # asymptote is actually the lower bound (given the asymptote's imprecision),
-    # which would mean it no longer improves.
-    return 1 - gumbel_pdf(choice.measurement.asymptote, choice.measurement.variance, choice.best_lower_bound)
+    # asymptote is actually the lower bound or lower
+    # (given the asymptote's imprecision), which would mean it no longer improves.
+    return 1 - gumbel_cdf(choice.measurement.asymptote, choice.measurement.variance, choice.best_lower_bound)
   else
     # Recursive computation: it is the probability that each subtree achieves an
     # improvement, weighed by the probability that that subtree is explored.
@@ -722,6 +722,18 @@ function prob_improvement(choice::Choice)::Float64
       subtree_weight * subtree_prob
     end, choice.constraints, init=0) / sum_subtree_weights
   end
+end
+
+function gumbel_cdf(mode, variance, value)
+  if variance == 0
+    if value >= mode
+      return 1  # The PDF spikes at the mode.
+    else
+      return 0
+    end
+  end
+  beta = sqrt(variance * 6 / pi^2)
+  return exp(-exp(-(value-mode)/beta))
 end
 
 function gumbel_pdf(mode, variance, value)
