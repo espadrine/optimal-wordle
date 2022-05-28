@@ -594,12 +594,13 @@ function add_measurement!(choice::Choice, new_measurement::Float64, new_lower_bo
     tree.best_choice = choice
   end
 
+  old_tree_best_lower_bound = tree.best_choice_lower_bound.best_lower_bound
   if new_lower_bound > choice.best_lower_bound
     choice.best_lower_bound = new_lower_bound
   end
-  if choice.best_lower_bound > tree.best_choice_lower_bound.best_lower_bound
+  if choice.best_lower_bound > old_tree_best_lower_bound
     println("Improvement found: ", choice_breadcrumb(choice), " ",
-            @sprintf("%.4f", tree.best_choice.best_lower_bound), "→",
+            @sprintf("%.4f", old_tree_best_lower_bound), "→",
             @sprintf("%.4f", choice.best_lower_bound),
             " (", tree.nsolutions, " sols)")
     tree.best_choice_lower_bound = choice
