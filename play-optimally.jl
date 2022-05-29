@@ -62,6 +62,16 @@ mutable struct ConvergingMeasurementDifferentials
   # List of average diffs between each measurement per number of visits.
   slopes::Vector{Float64}
   slope_visits::Vector{Int}
+  # Sum of slopes between a given visit count until the latest.
+  biases::Vector{Float64}
+  biases_visits::Vector{Int}
+  ## Average change in biases.
+  #bias_nudge::Vector{Float64}
+  ## Variance of average change in biases, multiplied by the number of samples
+  ## minus 1. (The reason it is not directly the variance, is to avoid numerical
+  ## error whilst using a streaming variance.)
+  #bias_nudge_variancet::Vector{Float64}
+
   # Accuracy computation arises from the difference between the start and
   # converged measurement value.
   init_slope::Float64  # Average slope of the first half of the data points.
@@ -69,7 +79,7 @@ mutable struct ConvergingMeasurementDifferentials
   # estimated_measurement(visits) = asymptote + exp_coeff × exp_base^visits
   exp_base::Float64
   exp_coeff::Float64
-  # Precision of the asymptote on the first three visits.
+  # Precision of the asymptote on a given visits.
   variance::Vector{Float64}
   variance_visits::Vector{Int}
   # y = ax^b, where a = coeff, b = exp, y = variance, x = aggregate visit.
@@ -82,40 +92,47 @@ function newConvergingMeasurementDifferentials()
   max_visits = visits
   slopes = []
   slope_visits = []
+  biases = [0]
+  biases_visits = [0]
+  #bias_nudge = [0]
+  #bias_nudge_variancet = [0]
   init_slope = 0
   exp_base = 0
   exp_coeff = 0
-  variance = [0, 0]
-  variance_visits = [0, 0]
+  variance = []
+  variance_visits = []
   variance_coeff = 0
   variance_exp = 0
-  return ConvergingMeasurementDifferentials(visits, max_visits, slopes, slope_visits, init_slope, exp_base, exp_coeff, variance, variance_visits, variance_coeff, variance_exp)
+  return ConvergingMeasurementDifferentials(visits, max_visits, slopes, slope_visits, biases, biases_visits, init_slope, exp_base, exp_coeff, variance, variance_visits, variance_coeff, variance_exp)
 end
 
 mutable struct ConvergingMeasurement
   latest::Float64
-  measurements::Vector{Float64}
   visits::Int
   current::Float64  # Smoothed latest value
   average::Float64
   # Estimation of where the sequence converges.
   # Always computed directly from the previous parameters.
   asymptote::Float64
-  variance::Float64  # Precision of the asymptote
+  # List of estimated asymptotes for each exploration.
+  asymptotes::Vector{Float64}
+  #asymptote_mean::Float64
+  #variancet::Float64  # Precision of the asymptote, as variance times N
   current_slope::Float64  # Average slope of the second half.
   differentials::ConvergingMeasurementDifferentials
 end
 
 function newConvergingMeasurement(differentials::ConvergingMeasurementDifferentials)::ConvergingMeasurement
   latest = 0
-  measurements = [0, 0]
   visits = 0
   current = latest
   average = latest
   asymptote = latest
-  variance = 0
+  asymptotes = []
+  #asymptote_mean = latest
+  #variancet = 0
   current_slope = 0
-  return ConvergingMeasurement(latest, measurements, visits, current, average, asymptote, variance, current_slope, differentials)
+  return ConvergingMeasurement(latest, visits, current, average, asymptote, asymptotes, current_slope, differentials)
 end
 
 function newConvergingMeasurement()::ConvergingMeasurement
@@ -129,9 +146,6 @@ function add_measurement!(aggregate::ConvergingMeasurement, new_measurement::Flo
   # Update value statistics.
   old_measurement = aggregate.latest
   aggregate.latest = new_measurement
-  if aggregate.visits < 3
-    aggregate.measurements[aggregate.visits] = new_measurement
-  end
   aggregate.average = (aggregate.average * (aggregate.visits-1) + new_measurement) / aggregate.visits
   aggregate.current = if aggregate.visits < 2
     new_measurement
@@ -155,9 +169,28 @@ function update_differentials!(aggregate::ConvergingMeasurement, measured_diff::
   if slope_visits > length(differentials.slopes)
     push!(differentials.slopes, 0)
     push!(differentials.slope_visits, 0)
+    push!(differentials.biases, 0)
+    push!(differentials.biases_visits, 0)
+    #push!(differentials.variancet, 0)
+    #push!(differentials.variancet_visits, 0)
+    #push!(differentials.bias_nudge, 0)
+    #push!(differentials.bias_nudge_variancet, 0)
   end
-  differentials.slopes[slope_visits] = (differentials.slopes[slope_visits] * differentials.slope_visits[slope_visits] + measured_diff) / (differentials.slope_visits[slope_visits] + 1)
   differentials.slope_visits[slope_visits] += 1
+  old_slope = differentials.slopes[slope_visits]
+  new_slope = streamed_mean(old_slope, measured_diff, differentials.slope_visits[slope_visits])
+  differentials.slopes[slope_visits] = new_slope
+
+  # Update biases.
+  nudge = new_slope - old_slope
+  for i = 1:aggregate.visits-1
+    differentials.biases_visits[i] += 1
+    differentials.biases[i] += nudge
+    #old_mean = differentials.bias_nudge[i]
+    #new_mean = streamed_mean(old_mean, nudge, differentials.biases_visits[i]-1)
+    #differentials.bias_nudge[i] = new_mean
+    #differentials.bias_nudge_variancet[i] = streamed_variance_times_count(differentials.bias_nudge_variancet[i], old_mean, new_mean, nudge)
+  end
 
   # Exponential weighing of (½^i)÷2 to smooth the differential.
   # That way, the last weighs ½; the nearest 5th measurement still weighs >1%.
@@ -175,76 +208,118 @@ function update_differentials!(aggregate::ConvergingMeasurement, measured_diff::
 end
 
 # Average the exponential base and coefficient.
-function update_exponential_params!(aggregate::ConvergingMeasurement)
-  if aggregate.visits < 3
-    return  # We need at least 3 points.
-  end
-  differentials = aggregate.differentials
-
-  # Slopes.
-  slope_0 = 0
-  slope_1 = 0
-  slope_count = length(differentials.slopes)
-  slope_mid = slope_count ÷ 2
-  for diff in differentials.slopes[1:slope_mid]
-    slope_0 += diff
-  end
-  for diff in differentials.slopes[slope_mid+1:slope_count]
-    slope_1 += diff
-  end
-
-  # yi = a + bc^i
-  # => c = (y'i ÷ y'0)^(1/i))
-  # => c = ((y[n]-y[n/2]) ÷ (y[n/2]-y[0]))^(2/n))
-  new_exp_base = if slope_0 == 0
-    0.0
-  else
-    diff_quotient = slope_1 / slope_0
-    if diff_quotient < 0
-      0.0
-    else
-      diff_quotient^(2/slope_count)
-    end
-  end
-  differentials.exp_base = new_exp_base
-  if differentials.exp_base <= 0 || differentials.exp_base >= 1
-    return
-  end
-
-  # => b = y'1 ÷ (c×log(c))
-  new_exp_coeff = differentials.init_slope / (differentials.exp_base * log(differentials.exp_base))
-  differentials.exp_coeff = new_exp_coeff
-end
+#function update_exponential_params!(aggregate::ConvergingMeasurement)
+#  if aggregate.visits < 3
+#    return  # We need at least 3 points.
+#  end
+#  differentials = aggregate.differentials
+#
+#  # Slopes.
+#  slope_0 = 0
+#  slope_1 = 0
+#  slope_count = length(differentials.slopes)
+#  slope_mid = slope_count ÷ 2
+#  for diff in differentials.slopes[1:slope_mid]
+#    slope_0 += diff
+#  end
+#  for diff in differentials.slopes[slope_mid+1:slope_count]
+#    slope_1 += diff
+#  end
+#
+#  # yi = a + bc^i
+#  # => c = (y'i ÷ y'0)^(1/i))
+#  # => c = ((y[n]-y[n/2]) ÷ (y[n/2]-y[0]))^(2/n))
+#  new_exp_base = if slope_0 == 0
+#    0.0
+#  else
+#    diff_quotient = slope_1 / slope_0
+#    if diff_quotient < 0
+#      0.0
+#    else
+#      diff_quotient^(2/slope_count)
+#    end
+#  end
+#  differentials.exp_base = new_exp_base
+#  if differentials.exp_base <= 0 || differentials.exp_base >= 1
+#    return
+#  end
+#
+#  # => b = y'1 ÷ (c×log(c))
+#  new_exp_coeff = differentials.init_slope / (differentials.exp_base * log(differentials.exp_base))
+#  differentials.exp_coeff = new_exp_coeff
+#end
 
 function update_asymptote!(aggregate::ConvergingMeasurement)
   old_asymptote = aggregate.asymptote
-  aggregate.asymptote = estimate_asymptote(aggregate)
+  new_asymptote = estimate_asymptote(aggregate)
+  aggregate.asymptote = new_asymptote
+  is_new_asymptote_for_visit_count = aggregate.visits > length(aggregate.asymptotes)
+  if is_new_asymptote_for_visit_count
+    push!(aggregate.asymptotes, new_asymptote)
+  end
+
+  #for i = 1:2
+  #  dvisits = differentials.variance_visits[i]
+  #  squared_error = (aggregate.asymptote - aggregate.measurements[i])^2
+  #  if aggregate.visits == i  # First visit for this aggregate: we add the squared error.
+  #    differentials.variance_visits[i] += 1
+  #    differentials.variance[i] = if dvisits == 0
+  #      squared_error
+  #    else
+  #      differentials.variance[i] = (differentials.variance[i] * dvisits
+  #        + squared_error) / (dvisits+1)
+  #    end
+  #  elseif aggregate.visits > i  # Not the first visit: we substitute the squared error.
+  #    old_squared_error = (old_asymptote - aggregate.measurements[i])^2
+  #    differentials.variance[i] = (differentials.variance[i] * dvisits
+  #      - old_squared_error + squared_error) / dvisits
+  #  end
+  #end
+
+  #if differentials.variance[1] > 0 && differentials.variance[2] > 0
+  #  # y = ax^b, where a = coeff, b = exp, y = variance, x = aggregate visit.
+  #  differentials.variance_coeff = differentials.variance[1]
+  #  differentials.variance_exp = log2(differentials.variance[2] / differentials.variance_coeff)
+  #end
+  #aggregate.variance = estimate_variance(aggregate)
+
   differentials = aggregate.differentials
-
-  for i = 1:2
-    dvisits = differentials.variance_visits[i]
-    squared_error = (aggregate.asymptote - aggregate.measurements[i])^2
-    if aggregate.visits == i  # First visit for this aggregate: we add the squared error.
-      differentials.variance_visits[i] += 1
-      differentials.variance[i] = if dvisits == 0
-        squared_error
-      else
-        differentials.variance[i] = (differentials.variance[i] * dvisits
-          + squared_error) / (dvisits+1)
-      end
-    elseif aggregate.visits > i  # Not the first visit: we substitute the squared error.
-      old_squared_error = (old_asymptote - aggregate.measurements[i])^2
-      differentials.variance[i] = (differentials.variance[i] * dvisits
-        - old_squared_error + squared_error) / dvisits
+  for i = 1:aggregate.visits-1
+    # Replace squared error for this choice from the tree mean.
+    old_mean_variance = differentials.variance[i]
+    new_mean_variance = ((differentials.variance[i] * differentials.variance_visits[i]
+        - (aggregate.asymptotes[i] - old_asymptote)^2
+        + (aggregate.asymptotes[i] - new_asymptote)^2)
+      / differentials.variance_visits[i])
+    if new_mean_variance < 0
+      println("Negative variance ", differentials.variance[i], " from aggregate ", string(aggregate))
+      println("Old mean variance: ", old_mean_variance, " old asymptote: ", old_asymptote, " new asymptote: ", new_asymptote)
+      println("Variances: ", differentials.variance)
+      println("Variance visits: ", differentials.variance_visits)
+      println("Asymptotes: ", aggregate.asymptotes)
+      new_mean_variance = 0
     end
+    differentials.variance[i] = new_mean_variance
   end
+  # If we are the first to register a variance for this visit count, add it.
+  if length(differentials.variance) < aggregate.visits
+    push!(differentials.variance, 0)
+    push!(differentials.variance_visits, 0)
+  end
+  if is_new_asymptote_for_visit_count
+    differentials.variance_visits[aggregate.visits] += 1
+  end
+  # The squared error is zero for the new asymptote because the best known
+  # asymptote is the estimated asymptote (for now).
 
-  if differentials.variance[1] > 0 && differentials.variance[2] > 0
-    # y = ax^b, where a = coeff, b = exp, y = variance, x = aggregate visit.
-    differentials.variance_coeff = differentials.variance[1]
-    differentials.variance_exp = log2(differentials.variance[2] / differentials.variance_coeff)
-  end
-  aggregate.variance = estimate_variance(aggregate)
+  #old_asymptote_mean = aggregate.asymptote_mean
+  #new_asymptote_mean = streamed_mean(old_asymptote_mean, aggregate.asymptote, aggregate.visits)
+  #aggregate.asymptote_mean = new_asymptote_mean
+  #aggregate.variancet = streamed_variance_times_count(aggregate.variancet, old_asymptote_mean, new_asymptote_mean, aggregate.asymptote)
+
+  #aggregate.differentials.variancet_visits[aggregate.visits] += 1
+  #old_average_variancet = aggregate.differentials.variancet[aggregate.visits]
+  #aggregate.differentials.variancet[aggregate.visits] = streamed_mean(old_average_variancet, aggregate.variancet, aggregate.differentials.variancet_visits[aggregate.visits])
 end
 
 function estimate_asymptote(aggregate::ConvergingMeasurement)::Float64
@@ -258,23 +333,52 @@ function estimate_asymptote_from_exp_reg(aggregate::ConvergingMeasurement)::Floa
   return aggregate.current - differentials.exp_coeff*differentials.exp_base^aggregate.visits
 end
 
-# Compute the bias that measurements incur by summing the averaged diffs between
-# each sequential measurement.
-function estimate_asymptote_from_bias(aggregate::ConvergingMeasurement)::Float64
+function estimate_bias(aggregate::ConvergingMeasurement)::Float64
   differentials = aggregate.differentials
   bias = 0
   v = max(aggregate.visits, 1)
   for i = v:differentials.max_visits-1
     bias += differentials.slopes[i]
   end
-  return aggregate.latest + bias
+  return bias
+end
+
+# Compute the bias that measurements incur by summing the averaged diffs between
+# each sequential measurement.
+function estimate_asymptote_from_bias(aggregate::ConvergingMeasurement)::Float64
+  return aggregate.latest + aggregate.differentials.biases[aggregate.visits]
+  #differentials = aggregate.differentials
+  #bias = 0
+  #v = max(aggregate.visits, 1)
+  #for i = v:differentials.max_visits-1
+  #  bias += differentials.slopes[i]
+  #end
+  #return aggregate.latest + bias
 end
 
 function estimate_variance(aggregate::ConvergingMeasurement)::Float64
-  if aggregate.differentials.variance_coeff == 0
-    return aggregate.differentials.variance[1]
+  variances = aggregate.differentials.variance
+  v = aggregate.visits
+  if variances[v] <= 0
+    if 2 <= v && v <= length(variances)+1
+      return variances[v-1]
+    else
+      return 0
+    end
+  else
+    return variances[v]
   end
-  return aggregate.differentials.variance_coeff * aggregate.visits ^ aggregate.differentials.variance_exp
+  #differentials = aggregate.differentials
+  #visits = differentials.biases_visits[aggregate.visits]
+  #if visits <= 1
+  #  return 0
+  #else
+  #  return aggregate.differentials.bias_nudge_variancet[aggregate.visits] / (aggregate.differentials.biases_visits[aggregate.visits]-1)
+  #end
+end
+
+function asymptote_variance(aggregate::ConvergingMeasurement)::Float64
+  return estimate_variance(aggregate)
 end
 
 function string(aggregate::ConvergingMeasurement)::String
@@ -283,18 +387,30 @@ function string(aggregate::ConvergingMeasurement)::String
     " v=", @sprintf("%d", aggregate.visits),
     " cur=", @sprintf("%.4f", aggregate.current),
     " avg=", @sprintf("%.4f", aggregate.average),
-    " asym=", @sprintf("%.4f", aggregate.asymptote),
-    " var=", @sprintf("%.4f", aggregate.variance),
-    " m=", @sprintf("[%.4f, %.4f]", aggregate.measurements[1], aggregate.measurements[2]),
+    " asym=[", join(map(a -> @sprintf("%.4f", a), aggregate.asymptotes[1:min(4, length(aggregate.asymptotes))]), " "), "]",
     " cur_slope=", @sprintf("%.4f", aggregate.current_slope),
     " init_slope=", @sprintf("%.4f", differentials.init_slope),
     " exp_base=", @sprintf("%.4f", differentials.exp_base),
     " exp_coeff=", @sprintf("%.4f", differentials.exp_coeff),
     " maxv=", @sprintf("%d", differentials.max_visits),
     " dv=", @sprintf("%d", differentials.visits),
-    " dvar=", @sprintf("[%.4f, %.4f]", differentials.variance[1], differentials.variance[2]),
+    " dvar=[", join(map(a -> @sprintf("%.4f", a), differentials.variance[1:min(4, length(differentials.variance))]), " "), "]",
     " dvar_coeff=", @sprintf("%.4f", differentials.variance_coeff),
     " dvar_exp=", @sprintf("%.4f", differentials.variance_exp))
+end
+
+# Streamed mean and variance of a sequence of values.
+# Welford’s online algorithm, as seen in
+# Donald Knuth’s Art of Computer Programming, Vol 2, page 232, 3rd edition.
+
+function streamed_mean(old_mean, new_value, new_count)
+  return old_mean + (new_value - old_mean) / new_count
+end
+
+# The variance is the output divided by the number of samples minus 1,
+# in order to avoid numerical errors and biases.
+function streamed_variance_times_count(old_variance, old_mean, new_mean, new_value)
+  return old_variance + (new_value-old_mean) * (new_value-new_mean)
 end
 
 mutable struct Choice
@@ -355,7 +471,7 @@ end
 
 function newChoice(guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}}, optimal_estimate::Float64, optimal_estimate_variance::Float64, differentials::ConvergingMeasurementDifferentials)::Choice
   measurement = newConvergingMeasurement(differentials)
-  measurement.variance = optimal_estimate_variance
+  #measurement.variancet = optimal_estimate_variance
   add_measurement!(measurement, optimal_estimate)
 
   tree = nothing
@@ -395,7 +511,7 @@ function newTree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}
   tree.best_choice_lower_bound = tree.best_choice
   for choice in tree.choices
     choice.tree = tree
-    choice.prob_optimal = prob_optimal_choice(choice.measurement.asymptote, choice.measurement.variance, tree)
+    choice.prob_optimal = prob_optimal_choice(choice.measurement.asymptote, asymptote_variance(choice.measurement), tree)
     tree.sum_prob_optimal += choice.prob_optimal
   end
   tree.sum_prob_optimal += tree.prob_non_cached_optimal
@@ -488,7 +604,7 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
           @sprintf("%.4f", -init_measurement_latest), "→",
           @sprintf("%.4f", -choice.measurement.latest), "∞→",
           @sprintf("%.4f", -choice.measurement.asymptote), "±",
-          @sprintf("%.4f", sqrt(choice.measurement.variance)), ";",
+          @sprintf("%.4f", sqrt(asymptote_variance(choice.measurement))), ";",
           @sprintf("e=%d%%", round(init_prob_explore * 100)), "→",
           @sprintf("%d%%", round(choice.prob_beat_best / tree.sum_prob_beat_best * 100)), ";",
           @sprintf("o=%d%%", round(choice.prob_optimal / tree.sum_prob_optimal * 100)), ";",
@@ -626,12 +742,13 @@ end
 # the odds that it is optimal and that its exploration improves its score.
 function update_prob_explore!(tree::Tree)
   for c in tree.choices
-    c.measurement.asymptote = estimate_asymptote(c.measurement)
-    c.measurement.variance = estimate_variance(c.measurement)
+    update_asymptote!(c.measurement)
+    #c.measurement.asymptote = estimate_asymptote(c.measurement)
+    #c.measurement.variance = estimate_variance(c.measurement)
   end
   sum_prob_optimal = 0
   for c in tree.choices
-    c.prob_optimal = prob_optimal_choice(c.measurement.asymptote, c.measurement.variance, tree)
+      c.prob_optimal = prob_optimal_choice(c.measurement.asymptote, asymptote_variance(c.measurement), tree)
     sum_prob_optimal += c.prob_optimal
   end
   tree.sum_prob_optimal = sum_prob_optimal + tree.prob_non_cached_optimal
@@ -661,7 +778,7 @@ function prob_optimal_choice(optimal_estimate::Float64, optimal_estimate_varianc
 end
 
 function prob_superior_choice(optimal_estimate::Float64, optimal_estimate_variance::Float64, other::Choice)::Float64
-  diff_variance = optimal_estimate_variance + other.measurement.variance
+  diff_variance = optimal_estimate_variance + asymptote_variance(other.measurement)
   if diff_variance == 0
     return 1
   end
@@ -700,7 +817,7 @@ function prob_improvement(choice::Choice)::Float64
     # Lacking children information, we compute the probability that the
     # asymptote is actually the lower bound or lower
     # (given the asymptote's imprecision), which would mean it no longer improves.
-    return 1 - gumbel_cdf(choice.measurement.asymptote, choice.measurement.variance, choice.best_lower_bound)
+    return 1 - gumbel_cdf(choice.measurement.asymptote, asymptote_variance(choice.measurement), choice.best_lower_bound)
   else
     # Recursive computation: it is the probability that each subtree achieves an
     # improvement, weighed by the probability that that subtree is explored.
@@ -836,12 +953,13 @@ function print_tree(tree::Tree)
   println("tree.sum_prob_optimal = ", tree.sum_prob_optimal)
   println("tree.sum_prob_beat_best = ", tree.sum_prob_beat_best)
   println("tree.prob_non_cached_optimal = ", tree.prob_non_cached_optimal)
-  println("tree.differentials = ", join(map(s -> @sprintf("%.3f", s), tree.differentials.slopes[1:min(10, length(tree.differentials.slopes))]), ", "))
+  println("tree.slopes = ", join(map(s -> @sprintf("%.3f", s), tree.differentials.slopes[1:min(10, length(tree.differentials.slopes))]), ", "))
+  println("tree.biases = ", join(map(s -> @sprintf("%.3f", s), tree.differentials.biases[1:min(10, length(tree.differentials.biases))]), ", "))
   for c in tree.choices
     println(str_from_word(c.guess), " ", @sprintf("%.4f", -c.best_lower_bound),
       "~", @sprintf("%.4f", -c.measurement.latest),
       "→", @sprintf("%.4f", -c.measurement.asymptote),
-      "±", @sprintf("%.4f", sqrt(c.measurement.variance)),
+      "±", @sprintf("%.4f", sqrt(asymptote_variance(c.measurement))),
       " o=", @sprintf("%.4f", c.prob_optimal / tree.sum_prob_optimal),
       " i=", @sprintf("%.4f", c.prob_improvement),
       " b=", @sprintf("%.4f", c.prob_beat_best / tree.sum_prob_beat_best),
