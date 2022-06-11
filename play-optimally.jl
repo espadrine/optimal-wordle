@@ -16,10 +16,11 @@ function main()
     step = 0
     if length(remaining_solutions) == 2315
       @time while tree.best_choice.best_lower_bound < -3.4212
-        improve!(tree, remaining_solutions, allowed_guesses)
+        add_time(computation_timers.improve, @elapsed improve!(tree, remaining_solutions, allowed_guesses))
         step += 1
 
         choice = tree.best_choice
+        println("Times: ", string(computation_timers))
         print("We suggest ", str_from_word(choice.guess), " (",
                 @sprintf("%.4f", -choice.best_lower_bound), "~",
                 @sprintf("%.4f", -choice.measurement.asymptote),
@@ -465,6 +466,36 @@ end
 salet_accuracy = 0
 salet_accuracy_count = 0
 
+mutable struct ComputationTimer
+  avg_time::Float64
+  count::Int
+end
+
+function add_time(timer::ComputationTimer, new_time::Float64)
+  timer.count += 1
+  timer.avg_time = streamed_mean(timer.avg_time, new_time, timer.count)
+end
+
+struct ComputationTimers
+  improve::ComputationTimer
+  select_choice::ComputationTimer
+  new_tree::ComputationTimer
+  add_measurement::ComputationTimer
+  update_prob_explore::ComputationTimer
+end
+
+function string(computation_timers::ComputationTimers)
+  return string(
+    @sprintf("improve: %.2fs; ", computation_timers.improve.avg_time),
+    @sprintf("select_choice: %.2fs; ", computation_timers.select_choice.avg_time),
+    @sprintf("new_tree: %.2fs; ", computation_timers.new_tree.avg_time),
+    @sprintf("add_measurement: %.2fs; ", computation_timers.add_measurement.avg_time),
+    @sprintf("update_prob_explore: %.2fs; ", computation_timers.update_prob_explore.avg_time),
+  )
+end
+
+computation_timers = ComputationTimers(ComputationTimer(0, 0), ComputationTimer(0, 0), ComputationTimer(0, 0), ComputationTimer(0, 0), ComputationTimer(0, 0))
+
 # Improve the policy by gathering data from using it with all solutions.
 # Returns the average number of guesses to win across all solutions.
 function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Float64
@@ -476,7 +507,9 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
   end
 
   # Select the next choice based on the optimal-converging policy
-  choice = best_exploratory_choice_with_ordering!(tree, solutions, guesses)
+  add_time(computation_timers.select_choice, @elapsed begin
+    choice = best_exploratory_choice_with_ordering!(tree, solutions, guesses)
+  end)
   init_prob_explore = choice.prob_beat_best / tree.sum_prob_beat_best
   init_measurement_latest = choice.measurement.latest
   if nsolutions == 2315
@@ -510,8 +543,10 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
     subtree = choice.constraints[constraint + 1]
 
     if isnothing(subtree)        # Initialize the next move.
-      subtree = newTree(guesses, remaining_solutions, choice, constraint)
-      choice.constraints[constraint + 1] = subtree
+      add_time(computation_timers.new_tree, @elapsed begin
+        subtree = newTree(guesses, remaining_solutions, choice, constraint)
+        choice.constraints[constraint + 1] = subtree
+      end)
     else
       improve!(subtree, remaining_solutions, guesses)
     end
@@ -534,8 +569,12 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
   # Update information about the current best policy.
   new_guesses_remaining = best_guesses_to_win / nsolutions
   new_tree_optimal_estimate /= nsolutions
-  add_measurement!(choice, new_tree_optimal_estimate, new_guesses_remaining)
-  update_prob_explore!(tree)
+  add_time(computation_timers.add_measurement, @elapsed begin
+    add_measurement!(choice, new_tree_optimal_estimate, new_guesses_remaining)
+  end)
+  add_time(computation_timers.update_prob_explore, @elapsed begin
+    update_prob_explore!(tree)
+  end)
   if nsolutions == 2315
     println("Explored ", choice_breadcrumb(choice), ": ", nsolutions, " sols (",
             @sprintf("%.4f", -choice.best_lower_bound), "~",
