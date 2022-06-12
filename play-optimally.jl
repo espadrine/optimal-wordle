@@ -575,7 +575,10 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
   add_time(computation_timers.update_prob_explore, @elapsed begin
     update_prob_explore!(tree)
   end)
-  if nsolutions == 2315
+  #if nsolutions == 2315
+  if !isnothing(findfirst(s -> str_from_word(s) == "linen", solutions))
+    println("First choice optimal prob: ", tree.choices[1].prob_optimal)
+    print_tree(tree)
     println("Explored ", choice_breadcrumb(choice), ": ", nsolutions, " sols (",
             @sprintf("%.4f", -choice.best_lower_bound), "~",
             @sprintf("%.4f", -init_measurement_latest), "→",
@@ -735,10 +738,6 @@ function update_prob_explore!(tree::Tree)
     sum_prob_beat_best += c.prob_beat_best
   end
   tree.sum_prob_beat_best = sum_prob_beat_best + tree.prob_non_cached_optimal / tree.sum_prob_optimal
-  if isnothing(tree.previous_choice)
-    println("First choice optimal prob: ", tree.choices[1].prob_optimal)
-    print_tree(tree)
-  end
 end
 
 # Probability that this choice is optimal under perfect play.
