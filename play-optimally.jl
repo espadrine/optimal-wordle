@@ -551,10 +551,12 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
       improve!(subtree, remaining_solutions, guesses)
     end
 
-    # Full-depth:
+    ## Full-depth:
     #if isnothing(subtree)        # Initialize the next move.
-    #  subtree = newTree(guesses, remaining_solutions, choice, constraint)
-    #  choice.constraints[constraint + 1] = subtree
+    #  add_time(computation_timers.new_tree, @elapsed begin
+    #    subtree = newTree(guesses, remaining_solutions, choice, constraint)
+    #    choice.constraints[constraint + 1] = subtree
+    #  end)
     #end
     #improve!(subtree, remaining_solutions, guesses)
 
@@ -755,7 +757,11 @@ end
 function prob_superior_choice(optimal_estimate::Float64, optimal_estimate_variance::Float64, other::Choice)::Float64
   diff_variance = optimal_estimate_variance + asymptote_variance(other.measurement)
   if diff_variance == 0
-    return 1
+    if optimal_estimate >= other.measurement.asymptote
+      return 1
+    else
+      return 0
+    end
   end
   # We now pretend the difference between this choice’s distribution
   # and the best choice’s is logistic.
