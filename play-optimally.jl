@@ -614,72 +614,88 @@ function best_exploratory_choice_with_ordering!(tree::Tree, solutions::Vector{Ve
 end
 
 function best_exploratory_choice(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
-  choice_info = best_cached_exploratory_choice(tree)
-  if !isnothing(choice_info)
-    return choice_info
+  cached_choice, cached_idx, cached_next_visit = best_cached_exploratory_choice(tree)
+  if isnothing(cached_choice)
+    if isnothing(tree.previous_choice)
+      println("\nChose because no cached choice was available")
+    end
+    return best_non_cached_exploratory_choice(tree, guesses, solutions)
+  elseif cached_next_visit <= tree.visits
+    if isnothing(tree.previous_choice)
+      println("\nChose based on cached next visit: ", @sprintf("%.2f", cached_next_visit))
+    end
+    return cached_choice, cached_idx
   end
   # We had no choice whose frequency made it immediately eligible.
   # Does the non-cached choices’ probability give it an eligible frequency?
   prob_optimal_is_not_cached = tree.prob_non_cached_optimal / tree.sum_prob_optimal
-  next_visit = tree.last_non_cache_visit + 1 / prob_optimal_is_not_cached
-  if tree.visits >= next_visit
+  non_cached_visit_freq = 1 / prob_optimal_is_not_cached
+  non_cached_next_visit = tree.last_non_cache_visit + non_cached_visit_freq
+  if non_cached_next_visit <= tree.visits
+    if isnothing(tree.previous_choice)
+      println("\nChose based on non-cached next visit: ", @sprintf("%.2f", non_cached_next_visit))
+    end
     return best_non_cached_exploratory_choice(tree, guesses, solutions)
   end
-  return soonest_cached_exploratory_choice(tree, prob_optimal_is_not_cached, guesses, solutions)
+  # There are no choices intended to be visited right now (because of
+  # floating-point inaccuracies). Pick the choice to visit soonest.
+  if cached_next_visit < non_cached_next_visit
+    if isnothing(tree.previous_choice)
+      println("\nChose because cached next visit was soonest: ", @sprintf("%.2f", cached_next_visit))
+    end
+    return cached_choice, cached_idx
+  else
+    if isnothing(tree.previous_choice)
+      println("\nChose because non-cached next visit was soonest: ", @sprintf("%.2f", non_cached_next_visit))
+    end
+    return best_non_cached_exploratory_choice(tree, guesses, solutions)
+  end
 end
 
-function best_cached_exploratory_choice(tree::Tree)::Union{Tuple{Choice, Int}, Nothing}
+# Returns the choice, its index in the cache, and the next tree visit at which
+# it needed to be explored.
+function best_cached_exploratory_choice(tree::Tree)::Tuple{Union{Choice, Nothing}, Int, Float64}
+  min_next_visit = Inf
+  min_choice = nothing
+  min_idx = 0
   for (i, choice) in enumerate(tree.choices)
     # The frequency of visits should match the probability of exploration.
     next_visit = if choice.visits <= 0
       0.0
     else
-      choice.last_visit + 1 / (choice.prob_beat_best / tree.sum_prob_beat_best)
+      prob_visit = choice.prob_beat_best / tree.sum_prob_beat_best
+      visit_freq = 1 / prob_visit
+      choice.last_visit + visit_freq
     end
-    if tree.visits >= next_visit
-      if isnothing(tree.previous_choice)
-        println("\nChose based on cached next visit: ", @sprintf("%.2f", next_visit))
-      end
-      return choice, i
+    if next_visit <= tree.visits
+      return choice, i, next_visit
+    elseif next_visit < min_next_visit
+      min_next_visit = next_visit
+      min_choice = choice
+      min_idx = i
     end
   end
-  return nothing
+  return min_choice, min_idx, min_next_visit
 end
 
 function best_non_cached_exploratory_choice(tree::Tree, guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}})::Tuple{Choice, Int}
   # Find the remaining guess with the best estimate.
   choice = add_estimated_best_guess!(tree, guesses, solutions)
   tree.last_non_cache_visit = tree.visits
-  if isnothing(tree.previous_choice)
-    println("\nChose based on non-cached frequency: ", @sprintf("%.5f", 1 / (tree.prob_non_cached_optimal / tree.sum_prob_optimal)))
-  end
   return choice, length(tree.choices)
 end
 
-function soonest_cached_exploratory_choice(tree::Tree, prob_optimal_is_not_cached::Float64, guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}})::Tuple{Choice, Int}
-  min_choice = tree.choices[1]
-  min_idx = 1
-  min_next_visit = Inf
+# Pick the choice based on fair total expanded work: a choice that should be
+# explored at 40% should be explored until 40% of all historical explorations
+# is his.
+function fair_exploratory_choice(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
   for (i, choice) in enumerate(tree.choices)
-    next_visit = choice.last_visit + 1 / (choice.prob_beat_best / tree.sum_prob_beat_best)
-    if next_visit < min_next_visit
-      min_choice = choice
-      min_idx = i
-      min_next_visit = next_visit
+    prob_visit = choice.prob_beat_best / tree.sum_prob_beat_best
+    if choice.visits < tree.visits * prob_visit
+      return choice, i
     end
   end
-  # The visit frequency of the next non-cached choice is taken by dividing
-  # the probability that any non-cached choice is optimal, by the number of
-  # non-cached choices.
-  #next_non_cached_choice_visit = tree.last_non_cache_visit + 1 / (prob_optimal_is_not_cached / (length(guesses) - length(tree.choices)))
-  next_non_cached_choice_visit = tree.last_non_cache_visit + 1 / prob_optimal_is_not_cached
-  if next_non_cached_choice_visit < min_next_visit
-    return best_non_cached_exploratory_choice(tree, guesses, solutions)
-  end
-  if isnothing(tree.previous_choice)
-    println("\nChose based on soonest step: ", min_next_visit)
-  end
-  return min_choice, min_idx
+  return best_non_cached_exploratory_choice(tree, guesses, solutions)
 end
 
 function add_measurement!(choice::Choice, new_measurement::Float64, new_lower_bound::Float64)
