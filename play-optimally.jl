@@ -368,6 +368,7 @@ mutable struct Choice
   # We link it lazily to the next choice we make in the tree search.
   visits::Int
   last_visit::Int  # Number of tree visits during last exploration.
+  visits_with_improvement::Int
 
   measurement::ConvergingMeasurement
 
@@ -403,8 +404,9 @@ function newChoice(guess::Vector{UInt8})::Choice
   prob_beat_best = 0
   visits = 0
   last_visit = -1
+  visits_with_improvement = 0
   constraints = nothing
-  Choice(tree, guess, best_lower_bound, prob_optimal, prob_improvement, prob_beat_best, visits, last_visit, measurement, constraints)
+  Choice(tree, guess, best_lower_bound, prob_optimal, prob_improvement, prob_beat_best, visits, last_visit, visits_with_improvement, measurement, constraints)
 end
 
 function newChoice(guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}}, optimal_estimate::Float64, optimal_estimate_variance::Float64, differentials::ConvergingMeasurementDifferentials)::Choice
@@ -419,8 +421,9 @@ function newChoice(guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}}, optim
   prob_beat_best = 1
   visits = 0
   last_visit = -1
+  visits_with_improvement = 0
   constraints = nothing
-  Choice(tree, guess, -nsols, prob_optimal, prob_improvement, prob_beat_best, visits, last_visit, measurement, constraints)
+  Choice(tree, guess, -nsols, prob_optimal, prob_improvement, prob_beat_best, visits, last_visit, visits_with_improvement, measurement, constraints)
 end
 
 function newTree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}}, previous_choice::Union{Choice, Nothing}, constraint::UInt8)::Tree
@@ -701,7 +704,11 @@ end
 function add_measurement!(choice::Choice, new_measurement::Float64, new_lower_bound::Float64)
   tree = choice.tree
 
+  old_asymptote = choice.measurement.asymptote
   add_measurement!(choice.measurement, new_measurement)
+  if choice.measurement.asymptote > old_asymptote
+    choice.visits_with_improvement += 1
+  end
 
   if choice.measurement.asymptote > tree.best_choice.measurement.asymptote
     tree.best_choice = choice
@@ -810,6 +817,11 @@ end
 
 # Probability that exploring this choice will eventually yield an improvement.
 function prob_improvement(choice::Choice)::Float64
+  if choice.visits == 0
+    return 1
+  else
+    return choice.visits_with_improvement / choice.visits
+  end
   if isnothing(choice.constraints)
     # Lacking children information, we compute the probability that the
     # asymptote is actually the lower bound or lower
