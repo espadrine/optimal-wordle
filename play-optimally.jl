@@ -578,7 +578,7 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
     add_measurement!(choice, new_tree_optimal_estimate, new_guesses_remaining)
   end)
   add_time(computation_timers.update_prob_explore, @elapsed begin
-    update_prob_explore!(tree)
+    update_prob_explore!(tree, guesses)
   end)
   #if nsolutions == 2315
   if !isnothing(findfirst(s -> str_from_word(s) == "linen", solutions))
@@ -744,7 +744,7 @@ end
 
 # The likelihood that we pick a choice is its worthiness:
 # the odds that it is optimal and that its exploration improves its score.
-function update_prob_explore!(tree::Tree)
+function update_prob_explore!(tree::Tree, guesses::Vector{Vector{UInt8}})
   for c in tree.choices
     update_asymptote!(c.measurement)
     #c.measurement.asymptote = estimate_asymptote(c.measurement)
@@ -757,12 +757,20 @@ function update_prob_explore!(tree::Tree)
   end
   tree.sum_prob_optimal = sum_prob_optimal + tree.prob_non_cached_optimal
   sum_prob_beat_best = 0
+  min_prob_beat_best = Inf
   for c in tree.choices
-    c.prob_improvement = prob_improvement(c)
-    c.prob_beat_best = (c.prob_optimal / tree.sum_prob_optimal) * c.prob_improvement
+    #c.prob_improvement = prob_improvement(c)
+    #c.prob_beat_best = (c.prob_optimal / tree.sum_prob_optimal) * c.prob_improvement
+    c.prob_beat_best = prob_beat_best(c)
+    if c.prob_beat_best < min_prob_beat_best
+      min_prob_beat_best = c.prob_beat_best
+    end
     sum_prob_beat_best += c.prob_beat_best
   end
-  tree.sum_prob_beat_best = sum_prob_beat_best + tree.prob_non_cached_optimal / tree.sum_prob_optimal
+  #tree.sum_prob_beat_best = sum_prob_beat_best + tree.prob_non_cached_optimal / tree.sum_prob_optimal
+  count_non_cached = length(guesses) - length(tree.choices)
+  prob_non_cached_beat_best = 1 - (1 - min_prob_beat_best)^count_non_cached
+  tree.sum_prob_beat_best = sum_prob_beat_best + prob_non_cached_beat_best
 end
 
 # Probability that this choice is optimal under perfect play.
@@ -815,14 +823,20 @@ function prob_choice_reaching_optimal(optimal_estimate::Float64, optimal_estimat
   return exp(-(z + exp(-z))) / beta
 end
 
+# Probability that the given choice will surpass the best choice.
+# This assumes that the choice’s asymptote follows a Gumbel distribution.
+function prob_beat_best(choice::Choice)::Float64
+  return 1 - gumbel_cdf(choice.measurement.asymptote, asymptote_variance(choice.measurement), choice.tree.best_choice.measurement.asymptote)
+end
+
 # Probability that exploring this choice will eventually yield an improvement.
 function prob_improvement(choice::Choice)::Float64
-  if choice.visits == 0
-    return 1
-  else
-    return choice.visits_with_improvement / choice.visits
-  end
   if isnothing(choice.constraints)
+    if choice.visits == 0
+      return 1
+    else
+      return choice.visits_with_improvement / choice.visits
+    end
     # Lacking children information, we compute the probability that the
     # asymptote is actually the lower bound or lower
     # (given the asymptote's imprecision), which would mean it no longer improves.
