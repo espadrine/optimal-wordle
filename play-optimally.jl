@@ -609,10 +609,13 @@ function best_exploratory_choice(tree::Tree, solutions::Vector{Vector{UInt8}}, g
   # What is the cached choice whose frequency elects it first?
   cached_choice, cached_idx, cached_next_visit = best_cached_exploratory_choice(tree)
   if isnothing(cached_choice)
-    if isnothing(tree.previous_choice)
-      println("\nChose because no cached choice was available")
+    selection = best_non_cached_exploratory_choice(tree, guesses, solutions)
+    if !isnothing(selection)
+      if isnothing(tree.previous_choice)
+        println("\nChose because no cached choice was available")
+      end
+      return selection
     end
-    return best_non_cached_exploratory_choice(tree, guesses, solutions)
   end
   # What about the non-cached choices?
   uncached_exploration_prob = tree.prob_uncached_beat_best / tree.sum_prob_beat_best
@@ -624,10 +627,17 @@ function best_exploratory_choice(tree::Tree, solutions::Vector{Vector{UInt8}}, g
     end
     return cached_choice, cached_idx
   else
+    selection = best_non_cached_exploratory_choice(tree, guesses, solutions)
+    if isnothing(selection)
+      if isnothing(tree.previous_choice)
+        println("\nChose based on cached next visit as there are non uncached choices: ", @sprintf("%.2f", cached_next_visit))
+      end
+      return cached_choice, cached_idx
+    end
     if isnothing(tree.previous_choice)
       println("\nChose based on non-cached next visit: ", @sprintf("%.2f", non_cached_next_visit))
     end
-    return best_non_cached_exploratory_choice(tree, guesses, solutions)
+    return selection
   end
 end
 
@@ -655,16 +665,19 @@ function best_cached_exploratory_choice(tree::Tree)::Tuple{Union{Choice, Nothing
   return min_choice, min_idx, min_next_visit
 end
 
-function best_non_cached_exploratory_choice(tree::Tree, guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}})::Tuple{Choice, Int}
+function best_non_cached_exploratory_choice(tree::Tree, guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}})::Union{Tuple{Choice, Int}, Nothing}
   # Find the remaining guess with the best estimate.
   choice = add_choice_from_best_uncached_action!(tree, guesses, solutions)
+  if isnothing(choice)
+    return nothing
+  end
   tree.last_non_cache_visit = tree.visits
   return choice, length(tree.choices)
 end
 
 # Pick the choice based on fair total expanded work: a choice that should be
 # explored at 40% should be explored until 40% of all historical explorations
-# is his.
+# is theirs.
 function fair_exploratory_choice(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
   for (i, choice) in enumerate(tree.choices)
     prob_visit = choice.prob_beat_best / tree.sum_prob_beat_best
@@ -672,7 +685,11 @@ function fair_exploratory_choice(tree::Tree, solutions::Vector{Vector{UInt8}}, g
       return choice, i
     end
   end
-  return best_non_cached_exploratory_choice(tree, guesses, solutions)
+  selection = best_non_cached_exploratory_choice(tree, guesses, solutions)
+  if isnothing(selection)
+    tree.choices[1], 1
+  end
+  return selection
 end
 
 function add_measurement!(choice::Choice, new_measurement::Float64, new_lower_bound::Float64)
@@ -793,7 +810,6 @@ function prob_choice_reaching_optimal(optimal_estimate::Float64, optimal_estimat
 end
 
 # Probability that the given choice will surpass the best asymptote.
-# This assumes that the choice’s asymptote follows a Gumbel distribution.
 function prob_beat_best(choice::Choice)::Float64
   return prob_beat_best(choice.measurement.asymptote, asymptote_variance(choice.measurement), choice.tree.best_choice.measurement.asymptote)
 end
