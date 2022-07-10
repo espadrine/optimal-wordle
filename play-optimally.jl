@@ -249,7 +249,8 @@ function add_asymptote!(aggregate::ConvergingMeasurement)
   old_asymptote_variancet = aggregate.asymptote_variancet
   new_asymptote_count = aggregate.visits
   if new_asymptote_count != length(aggregate.asymptotes)
-    println("Invalid new_asymptote_count: ", new_asymptote_count, " while the registered asymptotes are ", aggregate.asymptotes)
+    println("Invalid new_asymptote_count: ", new_asymptote_count,
+            " while the registered asymptotes are ", aggregate.asymptotes)
   end
   new_asymptote_mean = streamed_mean(old_asymptote_mean, new_asymptote_value, new_asymptote_count)
   aggregate.asymptote_mean = new_asymptote_mean
@@ -630,7 +631,7 @@ function choice_with_max_expected_exploratory_reward(tree::Tree, solutions::Vect
   argmax_choice = nothing
   argmax_idx = 1
   for (i, choice) in enumerate(tree.choices)
-    if choice.exploratory_reward > max_exploratory_reward
+    if choice.exploratory_reward >= max_exploratory_reward
       max_exploratory_reward = choice.exploratory_reward
       argmax_choice = choice
       argmax_idx = i
@@ -638,11 +639,7 @@ function choice_with_max_expected_exploratory_reward(tree::Tree, solutions::Vect
   end
   # If we pick the newest choice, we uncache a choice.
   if argmax_choice == tree.newest_choice || isnothing(argmax_choice)
-    uncached_choice = add_choice_from_best_uncached_action!(tree, guesses, solutions)
-    if isnothing(uncached_choice)
-      error(string("choice_with_max_expected_exploratory_reward: error: ",
-        "no uncached choices in ", choice_breadcrumb(tree.previous_choice)))
-    end
+    add_choice_from_best_uncached_action!(tree, guesses, solutions)
   end
   return argmax_choice, argmax_idx
 end
@@ -670,7 +667,7 @@ end
 #  ⠸⠊⠁    │             ⠈⠑⠒⠢⠤⠤⠤⠤⠤⠤⠤⠤⠤
 # ────────┼──────────────────────────────────→  Expl. reward
 function exploratory_reward(choice::Choice)::Float64
-  samples = 16
+  samples = 64
   sum = 0
   for _ in 1:samples
     sum += sample_exploratory_reward(choice::Choice)
