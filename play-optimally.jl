@@ -667,7 +667,7 @@ end
 #  ⠸⠊⠁    │             ⠈⠑⠒⠢⠤⠤⠤⠤⠤⠤⠤⠤⠤
 # ────────┼──────────────────────────────────→  Expl. reward
 function exploratory_reward(choice::Choice)::Float64
-  samples = 64
+  samples = 16
   sum = 0
   for _ in 1:samples
     sum += sample_exploratory_reward(choice::Choice)
@@ -687,8 +687,9 @@ function sample_exploratory_reward(choice::Choice)::Float64
   if variance == 0
     return 0  # We cannot improve on what is determined.
   end
+  scale = sqrt(variance * (6/pi^2))
 
-  new_play_reward = rand(Gumbel(mode, variance))
+  new_play_reward = rand(Gumbel(mode, scale))
   current_best_play_reward = choice.tree.best_choice.measurement.asymptote
   new_best_play_reward = if choice == choice.tree.best_choice
     max(new_play_reward, choice.tree.second_best_choice.measurement.asymptote)
