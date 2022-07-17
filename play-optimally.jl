@@ -359,8 +359,10 @@ function streamed_variance_times_count(old_variance, old_mean, new_mean, new_val
   return old_variance + (new_value-old_mean) * (new_value-new_mean)
 end
 
+abstract type AbstractTree end
+
 mutable struct Choice
-  tree::Any
+  tree::AbstractTree
   guess::Vector{UInt8}
 
   # Including this guess, how many guesses until the win using the current best
@@ -380,10 +382,10 @@ mutable struct Choice
 
   measurement::ConvergingMeasurement
 
-  constraints::Union{Vector{Any}, Nothing}
+  constraints::Union{Vector{Union{AbstractTree, Nothing}}, Nothing}
 end
 
-mutable struct Tree
+mutable struct Tree <: AbstractTree
   previous_choice::Union{Choice, Nothing}
   constraint::UInt8
   choices::Vector{Choice}
@@ -667,7 +669,7 @@ end
 #  ⠸⠊⠁    │             ⠈⠑⠒⠢⠤⠤⠤⠤⠤⠤⠤⠤⠤
 # ────────┼──────────────────────────────────→  Expl. reward
 function exploratory_reward(choice::Choice)::Float64
-  samples = 16
+  samples = 64
   sum = 0
   for _ in 1:samples
     sum += sample_exploratory_reward(choice::Choice)
@@ -694,7 +696,7 @@ function sample_exploratory_reward(choice::Choice)::Float64
   new_best_play_reward = if choice == choice.tree.best_choice
     max(new_play_reward, choice.tree.second_best_choice.measurement.asymptote)
   else
-    max(new_play_reward, choice.tree.best_choice.measurement.asymptote)
+    max(new_play_reward, current_best_play_reward)
   end
   improvement = new_best_play_reward - current_best_play_reward
   return improvement
