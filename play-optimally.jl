@@ -13,7 +13,7 @@ function main()
   allowed_guesses = vcat(words, non_solution_words)
 
   remaining_solutions = copy(words)  # List of words that currently fit all known constraints.
-  tree = newTree(allowed_guesses, remaining_solutions, nothing, UInt8(0))
+  tree = Tree(allowed_guesses, remaining_solutions, nothing, UInt8(0))
   while length(remaining_solutions) > 1
     step = 0
     if length(remaining_solutions) == 2315
@@ -84,7 +84,7 @@ mutable struct ConvergingMeasurementDifferentials
   variance_exp::Float64
 end
 
-function newConvergingMeasurementDifferentials()
+function ConvergingMeasurementDifferentials()
   visits = 0
   max_visits = visits
   slopes = []
@@ -117,7 +117,7 @@ mutable struct ConvergingMeasurement
   differentials::ConvergingMeasurementDifferentials
 end
 
-function newConvergingMeasurement(differentials::ConvergingMeasurementDifferentials)::ConvergingMeasurement
+function ConvergingMeasurement(differentials::ConvergingMeasurementDifferentials)::ConvergingMeasurement
   latest = 0
   visits = 0
   current = latest
@@ -130,8 +130,8 @@ function newConvergingMeasurement(differentials::ConvergingMeasurementDifferenti
   return ConvergingMeasurement(latest, visits, current, average, asymptote, asymptotes, asymptote_mean, asymptote_variancet, current_slope, differentials)
 end
 
-function newConvergingMeasurement()::ConvergingMeasurement
-  return newConvergingMeasurement(newConvergingMeasurementDifferentials())
+function ConvergingMeasurement()::ConvergingMeasurement
+  return ConvergingMeasurement(ConvergingMeasurementDifferentials())
 end
 
 # Visits are 0-indexed.
@@ -402,8 +402,8 @@ mutable struct Tree <: AbstractTree
   differentials::ConvergingMeasurementDifferentials
 end
 
-function newChoice(guess::Vector{UInt8})::Choice
-  measurement = newConvergingMeasurement()
+function Choice(guess::Vector{UInt8})::Choice
+  measurement = ConvergingMeasurement()
   optimal_estimate = -1
   add_measurement!(measurement, optimal_estimate)
 
@@ -419,8 +419,8 @@ function newChoice(guess::Vector{UInt8})::Choice
   Choice(tree, guess, best_lower_bound, prob_optimal, prob_improvement, exploratory_reward, visits, last_visit, visits_with_improvement, measurement, constraints)
 end
 
-function newChoice(tree::Tree, guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}}, optimal_estimate::Float64, differentials::ConvergingMeasurementDifferentials)::Choice
-  measurement = newConvergingMeasurement(differentials)
+function Choice(tree::Tree, guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}}, optimal_estimate::Float64, differentials::ConvergingMeasurementDifferentials)::Choice
+  measurement = ConvergingMeasurement(differentials)
   add_measurement!(measurement, optimal_estimate)
 
   nsols = Float64(length(solutions))
@@ -434,10 +434,10 @@ function newChoice(tree::Tree, guess::Vector{UInt8}, solutions::Vector{Vector{UI
   return Choice(tree, guess, -nsols, prob_optimal, prob_improvement, exploratory_reward, visits, last_visit, visits_with_improvement, measurement, constraints)
 end
 
-function newTree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}}, previous_choice::Union{Choice, Nothing}, constraint::UInt8)::Tree
+function Tree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}}, previous_choice::Union{Choice, Nothing}, constraint::UInt8)::Tree
   nsols = length(solutions)
   if nsols == 1
-    choice = newChoice(solutions[1])
+    choice = Choice(solutions[1])
     best_choice = choice
     second_best_choice = choice
     best_choice_lower_bound = choice
@@ -454,10 +454,10 @@ function newTree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}
   sum_prob_optimal = 0
   newest_choice = nothing
   last_non_cache_visit = -1
-  tree = Tree(previous_choice, constraint, [], Dict{Vector{UInt8}, Choice}(), nothing, nothing, nothing, nsols, visits, sum_prob_optimal, newest_choice, last_non_cache_visit, newConvergingMeasurementDifferentials())
+  tree = Tree(previous_choice, constraint, [], Dict{Vector{UInt8}, Choice}(), nothing, nothing, nothing, nsols, visits, sum_prob_optimal, newest_choice, last_non_cache_visit, ConvergingMeasurementDifferentials())
   add_choice_from_best_uncached_action!(tree, guesses, solutions)
   if isnothing(tree.best_choice)
-    error(string("newTree: error: no best choice found, in ", choice_breadcrumb(tree.previous_choice)))
+    error(string("Tree: error: no best choice found, in ", choice_breadcrumb(tree.previous_choice)))
   end
   update_prob_explore!(tree)
   return tree
@@ -545,7 +545,7 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
 
     if isnothing(subtree)        # Initialize the next move.
       add_time(computation_timers.new_tree, @elapsed begin
-        subtree = newTree(guesses, remaining_solutions, choice, constraint)
+        subtree = Tree(guesses, remaining_solutions, choice, constraint)
         choice.constraints[constraint + 1] = subtree
       end)
     else
@@ -555,7 +555,7 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
     ## Full-depth:
     #if isnothing(subtree)        # Initialize the next move.
     #  add_time(computation_timers.new_tree, @elapsed begin
-    #    subtree = newTree(guesses, remaining_solutions, choice, constraint)
+    #    subtree = Tree(guesses, remaining_solutions, choice, constraint)
     #    choice.constraints[constraint + 1] = subtree
     #  end)
     #end
@@ -1002,7 +1002,7 @@ function add_choice_from_best_uncached_action!(
     return nothing
   end
 
-  choice = newChoice(tree, best_action_estimate.action, solutions,
+  choice = Choice(tree, best_action_estimate.action, solutions,
     best_action_estimate.cumulative_reward, tree.differentials)
   if length(tree.choices) == 0
     tree.best_choice = choice
@@ -1045,7 +1045,7 @@ end
 #    tree.prob_uncached_beat_best = prob_beat_best(second_best_action_estimate.cumulative_reward, uncached_variance, best_reward)
 #  end
 #
-#  choice = newChoice(best_action_estimate.action, solutions, best_action_estimate.cumulative_reward, uncached_variance, tree.differentials)
+#  choice = Choice(best_action_estimate.action, solutions, best_action_estimate.cumulative_reward, uncached_variance, tree.differentials)
 #  choice.tree = tree
 #  push!(tree.choices, choice)
 #  tree.choice_from_guess[best_action_estimate.action] = choice
@@ -1128,7 +1128,7 @@ end
 #  # Thus the average variance of each estimate is this:
 #  choice_optimal_estimate_variance = optimal_estimate_variance * nguesses
 #
-#  choice = newChoice(best_guess, solutions, best_optimal_estimate, choice_optimal_estimate_variance, tree.differentials)
+#  choice = Choice(best_guess, solutions, best_optimal_estimate, choice_optimal_estimate_variance, tree.differentials)
 #  choice.tree = tree
 #  push!(tree.choices, choice)
 #  tree.choice_from_guess[best_guess] = choice
