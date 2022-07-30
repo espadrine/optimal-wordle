@@ -360,6 +360,8 @@ function streamed_variance_times_count(old_variance, old_mean, new_mean, new_val
 end
 
 abstract type AbstractTree end
+abstract type AbstractEstimatorStats end
+abstract type AbstractEstimator end
 
 mutable struct Choice
   tree::AbstractTree
@@ -381,6 +383,7 @@ mutable struct Choice
   visits_with_improvement::Int
 
   measurement::ConvergingMeasurement
+  reward_estimator::Union{AbstractEstimator, Nothing}
 
   constraints::Union{Vector{Union{AbstractTree, Nothing}}, Nothing}
 end
@@ -400,12 +403,11 @@ mutable struct Tree <: AbstractTree
   newest_choice::Union{Choice, Nothing}
   last_non_cache_visit::Int  # Visit count when we last included a guess in the list of choices.
   differentials::ConvergingMeasurementDifferentials
+  estimator_stats::AbstractEstimatorStats
 end
 
 function Choice(guess::Vector{UInt8})::Choice
   measurement = ConvergingMeasurement()
-  optimal_estimate = -1
-  add_measurement!(measurement, optimal_estimate)
 
   tree = nothing
   best_lower_bound = -1
@@ -415,13 +417,13 @@ function Choice(guess::Vector{UInt8})::Choice
   visits = 0
   last_visit = -1
   visits_with_improvement = 0
+  reward_estimator = nothing
   constraints = nothing
-  Choice(tree, guess, best_lower_bound, prob_optimal, prob_improvement, exploratory_reward, visits, last_visit, visits_with_improvement, measurement, constraints)
+  Choice(tree, guess, best_lower_bound, prob_optimal, prob_improvement, exploratory_reward, visits, last_visit, visits_with_improvement, measurement, reward_estimator, constraints)
 end
 
 function Choice(tree::Tree, guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}}, optimal_estimate::Float64, differentials::ConvergingMeasurementDifferentials)::Choice
   measurement = ConvergingMeasurement(differentials)
-  add_measurement!(measurement, optimal_estimate)
 
   nsols = Float64(length(solutions))
   prob_optimal = 1
@@ -430,8 +432,10 @@ function Choice(tree::Tree, guess::Vector{UInt8}, solutions::Vector{Vector{UInt8
   visits = 0
   last_visit = -1
   visits_with_improvement = 0
+  reward_estimator = Estimator(tree.estimator_stats)
+  add_estimate!(reward_estimator, optimal_estimate)
   constraints = nothing
-  return Choice(tree, guess, -nsols, prob_optimal, prob_improvement, exploratory_reward, visits, last_visit, visits_with_improvement, measurement, constraints)
+  return Choice(tree, guess, -nsols, prob_optimal, prob_improvement, exploratory_reward, visits, last_visit, visits_with_improvement, measurement, reward_estimator, constraints)
 end
 
 function Tree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}}, previous_choice::Union{Choice, Nothing}, constraint::UInt8)::Tree
@@ -445,8 +449,10 @@ function Tree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}}, 
     sum_prob_optimal = choice.prob_optimal
     newest_choice = nothing
     last_non_cache_visit = -1
-    tree = Tree(previous_choice, constraint, [choice], Dict([(choice.guess, choice)]), best_choice, second_best_choice, best_choice_lower_bound, nsols, visits, sum_prob_optimal, newest_choice, last_non_cache_visit, choice.measurement.differentials)
+    estimator_stats = EstimatorStats()
+    tree = Tree(previous_choice, constraint, [choice], Dict([(choice.guess, choice)]), best_choice, second_best_choice, best_choice_lower_bound, nsols, visits, sum_prob_optimal, newest_choice, last_non_cache_visit, choice.measurement.differentials, estimator_stats)
     choice.tree = tree
+    estimator_stats.tree = tree
     return tree
   end
 
@@ -454,7 +460,9 @@ function Tree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}}, 
   sum_prob_optimal = 0
   newest_choice = nothing
   last_non_cache_visit = -1
-  tree = Tree(previous_choice, constraint, [], Dict{Vector{UInt8}, Choice}(), nothing, nothing, nothing, nsols, visits, sum_prob_optimal, newest_choice, last_non_cache_visit, ConvergingMeasurementDifferentials())
+  estimator_stats = EstimatorStats()
+  tree = Tree(previous_choice, constraint, [], Dict{Vector{UInt8}, Choice}(), nothing, nothing, nothing, nsols, visits, sum_prob_optimal, newest_choice, last_non_cache_visit, ConvergingMeasurementDifferentials(), estimator_stats)
+  estimator_stats.tree = tree
   add_choice_from_best_uncached_action!(tree, guesses, solutions)
   if isnothing(tree.best_choice)
     error(string("Tree: error: no best choice found, in ", choice_breadcrumb(tree.previous_choice)))
@@ -462,6 +470,158 @@ function Tree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}}, 
   update_prob_explore!(tree)
   return tree
 end
+
+
+# We assume that measurements follow a common statistical distribution for the
+# same amount of exploration, with respect to how off they are from the
+# asymptotic measurement. We estimate the distribution based on all the measured
+# deltas (for a given exploration count) between the initial estimate measured,
+# and the expected value of the asymptotic measurement after an infinite number
+# of explorations.
+mutable struct ErrorDistribution
+  mean::Float64
+  variance::Float64
+end
+
+ErrorDistribution() = ErrorDistribution(0.0, 0.0)
+
+mutable struct EstimatorStats <: AbstractEstimatorStats
+  # The overall bias from one exploration count, to the latest exploration.
+  bias::Vector{Float64}
+  # The variance between a debiased estimate at an exploration count, and the
+  # latest expected debiased estimate.
+  variance::Vector{Float64}
+  tree::Union{Tree, Nothing}
+end
+
+EstimatorStats() = EstimatorStats([], [], nothing)
+
+function mean_estimate_bias(stats::EstimatorStats, exploration_count::Int)::Float64
+  sum = 0
+  count = 0
+  for choice in stats.tree.choices
+    if length(choice.reward_estimator.values) < exploration_count
+      continue
+    end
+    estimate = choice.reward_estimator.values[exploration_count]
+    expected_actual = choice.reward_estimator.mode
+    error = (expected_actual - estimate)
+    sum += error
+    count += 1
+  end
+  if count == 0
+    return 0
+  end
+  return sum / count
+end
+
+function variance_estimate_error(stats::EstimatorStats, exploration_count::Int)::Float64
+  bias = stats.bias[exploration_count]
+  sum = 0
+  count = 0
+  for choice in stats.tree.choices
+    if length(choice.reward_estimator.values) < exploration_count
+      continue
+    end
+    # Debias the estimate at that exploration count.
+    debiased_estimate = choice.reward_estimator.values[exploration_count] + bias
+    expected_actual = choice.reward_estimator.mean
+    error = expected_actual - debiased_estimate
+    sum += error^2
+    count += 1
+  end
+  if count == 0
+    return 0
+  end
+  return sum / count
+end
+
+function append_exploration!(stats::EstimatorStats)
+  push!(stats.bias, 0)
+  push!(stats.variance, 0)
+end
+
+function update_error!(stats::EstimatorStats, explorations::Int)
+  while length(stats.bias) < explorations
+    append_exploration!(stats)
+  end
+  for exploration_count in 1:length(stats.bias)
+    stats.bias[exploration_count] = mean_estimate_bias(stats, exploration_count)
+    stats.variance[exploration_count] = variance_estimate_error(stats, exploration_count)
+  end
+  for choice in stats.tree.choices
+    estimator = choice.reward_estimator
+    estimator.mode = mode(estimator)
+    estimator.variance = variance(estimator)
+    estimator.mean = mean(estimator)
+  end
+end
+
+mutable struct Estimator <: AbstractEstimator
+  # Each recorded value is a reward for a different exploration.
+  latest_value::Float64
+  values::Vector{Float64}
+  mode::Float64
+  # The expected value for a Gumbel distribution is a good estimation for the
+  # asymptotic value after an infinite number of explorations.
+  mean::Float64
+  variance::Float64
+  stats::EstimatorStats
+end
+
+Estimator(stats::EstimatorStats) = Estimator(0, [], 0, 0, 0, stats)
+
+# Likeliest value for the estimated reward.
+# We assume that the latest value obtained is the most accurate one.
+# We debias this value based on measured bias across all estimates at this
+# exploration count.
+function mode(estimator::Estimator)::Float64
+  return estimator.latest_value + estimator.stats.bias[length(estimator.values)]
+end
+
+# Variance for the estimated reward.
+# Var(latest_value + bias) = Var(bias).
+function variance(estimator::Estimator)::Float64
+  return estimator.stats.variance[length(estimator.values)]
+end
+
+# Can be used to compute the expected value assuming a Gumbel distribution.
+function mean(estimator::Estimator)::Float64
+  mode = estimator.mode
+  scale = sqrt(estimator.variance * (6/pi^2))
+  return mode + scale * MathConstants.eulergamma
+end
+
+function add_estimate!(estimator::Estimator, value::Float64)
+  push!(estimator.values, value)
+  estimator.latest_value = value
+  bias_idx = min(length(estimator.values), length(estimator.stats.bias))
+  if bias_idx == 0
+    estimator.mode = estimator.latest_value
+  else
+    bias = estimator.stats.bias[bias_idx]
+    estimator.mode = estimator.latest_value + bias
+  end
+  estimator.mean = mean(estimator)
+
+  # Update the error distribution.
+  update_error!(estimator.stats, length(estimator.values))
+end
+
+function string(estimator::Estimator)
+  bias = estimator.stats.bias
+  variance = estimator.stats.variance
+  return string(
+    @sprintf("lat=%.4f", estimator.latest_value),
+    @sprintf(" mod=%.4f", estimator.mode),
+    @sprintf(" mea=%.4f", estimator.mean),
+    @sprintf(" dev=%.4f", sqrt(estimator.variance)),
+    " val=…", join(map(v -> @sprintf("%.4f", v), estimator.values[max(1, length(estimator.values)-10):length(estimator.values)]), ","),
+    " bia=…", join(map(v -> @sprintf("%.4f", v), bias[max(1, length(bias)-10):length(bias)]), ","),
+    " dev=…", join(map(v -> @sprintf("%.4f", sqrt(v)), variance[max(1, length(variance)-10):length(variance)]), ","),
+  )
+end
+
 
 # We measure the mean squared error of the optimal estimate for the guess salet.
 salet_accuracy = 0
@@ -512,9 +672,9 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
     choice = best_exploratory_choice_with_ordering!(tree, solutions, guesses)
   end)
   init_exploratory_reward = choice.exploratory_reward
-  init_measurement_latest = choice.measurement.latest
+  init_estimate_latest = choice.reward_estimator.latest_value
   if nsolutions == 2315
-    println("Before exploration: ", string(choice.measurement))
+    println("Before exploration: ", string(choice.reward_estimator))
   end
   best_guesses_to_win = 0  # Measured best, to update the best score.
   new_tree_optimal_estimate = 0
@@ -565,8 +725,8 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
     best_guesses_to_win += (subtree.best_choice.best_lower_bound - 1) * nrsols
     # FIXME: we should not use the most optimistic estimate,
     # but the expected estimate,
-    # by weighing each asymptote by the probability that it is optimal.
-    new_tree_optimal_estimate += (subtree.best_choice.measurement.asymptote - 1) * nrsols
+    # by weighing each expected play reward by the probability that it is optimal.
+    new_tree_optimal_estimate += (subtree.best_choice.reward_estimator.mode - 1) * nrsols
   end
 
   # Update information about the current best policy.
@@ -585,19 +745,19 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
     print_tree(tree)
     println("Explored ", choice_breadcrumb(choice), ": ", nsolutions, " sols (",
             @sprintf("%.4f", -choice.best_lower_bound), "~",
-            @sprintf("%.4f", -init_measurement_latest), "→",
-            @sprintf("%.4f", -choice.measurement.latest), "∞→",
-            @sprintf("%.4f", -choice.measurement.asymptote), "±",
-            @sprintf("%.4f", sqrt(asymptote_variance(choice.measurement))), ";",
+            @sprintf("%.4f", -init_estimate_latest), "→",
+            @sprintf("%.4f", -choice.reward_estimator.latest_value), "∞→",
+            @sprintf("%.4f", -choice.reward_estimator.mode), "±",
+            @sprintf("%.4f", sqrt(choice.reward_estimator.variance)), ";",
             @sprintf("e=%d", init_exploratory_reward), "→",
             @sprintf("%d", choice.exploratory_reward), ";",
-            @sprintf("o=%d%%", round(choice.prob_optimal / tree.sum_prob_optimal * 100)), ";",
-            @sprintf("i=%d%%", round(choice.prob_improvement * 100)), ";",
+            #@sprintf("o=%d%%", round(choice.prob_optimal / tree.sum_prob_optimal * 100)), ";",
+            #@sprintf("i=%d%%", round(choice.prob_improvement * 100)), ";",
             " visits ", choice.visits, ")")
-    println("After exploration: ", string(choice.measurement))
+    println("After exploration: ", string(choice.reward_estimator))
     println()
     if str_from_word(choice.guess) == "salet" && salet_accuracy_count < 100
-      global salet_accuracy = ((salet_accuracy * salet_accuracy_count) + (choice.measurement.asymptote - -3.4212)^2) / (salet_accuracy_count+1)
+      global salet_accuracy = ((salet_accuracy * salet_accuracy_count) + (choice.reward_estimator.mode - -3.4212)^2) / (salet_accuracy_count+1)
       global salet_accuracy_count += 1
     end
   end
@@ -678,23 +838,17 @@ function exploratory_reward(choice::Choice)::Float64
 end
 
 function sample_exploratory_reward(choice::Choice)::Float64
-  mode = choice.measurement.asymptote
-  #if isnothing(choice.tree.previous_choice)
-  #  println("asymptote_variance = ", asymptote_variance(choice.measurement))
-  #  println("aggregate.differentials.variance = ", choice.measurement.differentials.variance)
-  #  println("aggregate.asymptote = ", choice.measurement.asymptote)
-  #  println("aggregate.visits = ", choice.measurement.visits)
-  #end
-  variance = asymptote_variance(choice.measurement)
+  mode = choice.reward_estimator.mode
+  variance = choice.reward_estimator.variance
   if variance == 0
     return 0  # We cannot improve on what is determined.
   end
   scale = sqrt(variance * (6/pi^2))
 
   new_play_reward = rand(Gumbel(mode, scale))
-  current_best_play_reward = choice.tree.best_choice.measurement.asymptote
+  current_best_play_reward = choice.tree.best_choice.reward_estimator.mode
   new_best_play_reward = if choice == choice.tree.best_choice
-    max(new_play_reward, choice.tree.second_best_choice.measurement.asymptote)
+    max(new_play_reward, choice.tree.second_best_choice.reward_estimator.mode)
   else
     max(new_play_reward, current_best_play_reward)
   end
@@ -790,11 +944,17 @@ end
 #end
 
 function add_measurement!(choice::Choice, new_measurement::Float64)
-  old_asymptote = choice.measurement.asymptote
-  add_measurement!(choice.measurement, new_measurement)
-  if choice.measurement.asymptote > old_asymptote
+  old_reward = choice.reward_estimator.mode
+  add_estimate!(choice.reward_estimator, new_measurement)
+  if choice.reward_estimator.mode > old_reward
     choice.visits_with_improvement += 1
   end
+
+  #old_asymptote = choice.measurement.asymptote
+  #add_measurement!(choice.measurement, new_measurement)
+  #if choice.measurement.asymptote > old_asymptote
+  #  choice.visits_with_improvement += 1
+  #end
 
   # Recursive constant:
   # tree.best_choice.best_lower_bound matches all recursive best choices.
@@ -814,7 +974,7 @@ end
 
 function update_best_choices!(choice::Choice, new_lower_bound::Float64)
   tree = choice.tree
-  if choice.measurement.asymptote > tree.best_choice.measurement.asymptote
+  if choice.reward_estimator.mode > tree.best_choice.reward_estimator.mode
     tree.second_best_choice = tree.best_choice
     tree.best_choice = choice
   end
@@ -830,36 +990,14 @@ function update_best_choices!(choice::Choice, new_lower_bound::Float64)
             " (", tree.nsolutions, " sols)")
     tree.best_choice_lower_bound = choice
   end
-
 end
 
 # The likelihood that we pick a choice is its worthiness:
 # the odds that it is optimal and that its exploration improves its score.
 function update_prob_explore!(tree::Tree)
   for c in tree.choices
-    update_asymptote!(c.measurement)
-  end
-  for c in tree.choices
     c.exploratory_reward = exploratory_reward(c)
   end
-
-  #sum_prob_optimal = 0
-  #for c in tree.choices
-  #  c.prob_optimal = prob_optimal_choice(c.measurement.asymptote, asymptote_variance(c.measurement), tree)
-  #  sum_prob_optimal += c.prob_optimal
-  #end
-  #tree.sum_prob_optimal = sum_prob_optimal + tree.prob_non_cached_optimal
-
-  #sum_prob_beat_best = 0
-  #for c in tree.choices
-  #  #c.prob_improvement = prob_improvement(c)
-  #  #c.prob_beat_best = (c.prob_optimal / tree.sum_prob_optimal) * c.prob_improvement
-  #  c.prob_beat_best = prob_beat_best(c)
-  #  c.prob_improvement = c.prob_beat_best
-  #  sum_prob_beat_best += c.prob_beat_best
-  #end
-  ##tree.sum_prob_beat_best = sum_prob_beat_best + tree.prob_non_cached_optimal / tree.sum_prob_optimal
-  #tree.sum_prob_beat_best = sum_prob_beat_best + tree.prob_uncached_beat_best
 end
 
 ## Probability that this choice is optimal under perfect play.
@@ -1179,9 +1317,9 @@ function print_tree(tree::Tree)
   println("tree.biases = ", join(map(s -> @sprintf("%.3f", s), tree.differentials.biases[1:min(10, length(tree.differentials.biases))]), ", "))
   for c in tree.choices
     println(str_from_word(c.guess), " ", @sprintf("%.4f", -c.best_lower_bound),
-      "~", @sprintf("%.4f", -c.measurement.latest),
-      "→", @sprintf("%.4f", -c.measurement.asymptote),
-      "±", @sprintf("%.4f", sqrt(asymptote_variance(c.measurement))),
+      "~", @sprintf("%.4f", -c.reward_estimator.latest_value),
+      "→", @sprintf("%.4f", -c.reward_estimator.mode),
+      "±", @sprintf("%.4f", sqrt(c.reward_estimator.variance)),
       #" o=", @sprintf("%.4f", c.prob_optimal / tree.sum_prob_optimal),
       #" i=", @sprintf("%.4f", c.prob_improvement),
       " er=", @sprintf("%.4f", c.exploratory_reward),
