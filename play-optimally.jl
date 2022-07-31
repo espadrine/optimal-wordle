@@ -478,83 +478,65 @@ end
 # deltas (for a given exploration count) between the initial estimate measured,
 # and the expected value of the asymptotic measurement after an infinite number
 # of explorations.
-mutable struct ErrorDistribution
-  mean::Float64
-  variance::Float64
-end
-
-ErrorDistribution() = ErrorDistribution(0.0, 0.0)
 
 mutable struct EstimatorStats <: AbstractEstimatorStats
-  # The overall bias from one exploration count, to the latest exploration.
+  visits::Vector{Int}
+  # For each estimate count, we keep track of the mean bias of the estimator.
+  # In other words, the average difference between an estimation with N
+  # explorations and one with N+1, the latter being assumed as more precise.
+  visit_bias::Vector{Float64}
+  # The overall bias from one estimate count, to the latest estimate.
   bias::Vector{Float64}
-  # The variance between a debiased estimate at an exploration count, and the
-  # latest expected debiased estimate.
-  variance::Vector{Float64}
+  # The variance of the difference between a debiased estimate at a given
+  # estimate count, and the debiased estimate at the next estimate count.
+  # It is used as the variance that an exploration can have on an estimate.
+  visit_variance::Vector{Float64}
   tree::Union{Tree, Nothing}
 end
 
-EstimatorStats() = EstimatorStats([], [], nothing)
-
-function mean_estimate_bias(stats::EstimatorStats, exploration_count::Int)::Float64
-  sum = 0
-  count = 0
-  for choice in stats.tree.choices
-    if length(choice.reward_estimator.values) < exploration_count
-      continue
-    end
-    estimate = choice.reward_estimator.values[exploration_count]
-    expected_actual = choice.reward_estimator.mode
-    error = (expected_actual - estimate)
-    sum += error
-    count += 1
-  end
-  if count == 0
-    return 0
-  end
-  return sum / count
-end
-
-function variance_estimate_error(stats::EstimatorStats, exploration_count::Int)::Float64
-  bias = stats.bias[exploration_count]
-  sum = 0
-  count = 0
-  for choice in stats.tree.choices
-    if length(choice.reward_estimator.values) < exploration_count
-      continue
-    end
-    # Debias the estimate at that exploration count.
-    debiased_estimate = choice.reward_estimator.values[exploration_count] + bias
-    expected_actual = choice.reward_estimator.mean
-    error = expected_actual - debiased_estimate
-    sum += error^2
-    count += 1
-  end
-  if count == 0
-    return 0
-  end
-  return sum / count
-end
+EstimatorStats() = EstimatorStats([], [], [], [], nothing)
 
 function append_exploration!(stats::EstimatorStats)
+  push!(stats.visits, 0)
+  push!(stats.visit_bias, 0)
   push!(stats.bias, 0)
-  push!(stats.variance, 0)
+  push!(stats.visit_variance, 0)
 end
 
-function update_error!(stats::EstimatorStats, explorations::Int)
-  while length(stats.bias) < explorations
-    append_exploration!(stats)
+function update_estimator_modes!(stats::EstimatorStats)
+  for choice in stats.tree.choices
+    choice.reward_estimator.mode = mode(choice.reward_estimator)
   end
-  for exploration_count in 1:length(stats.bias)
-    stats.bias[exploration_count] = mean_estimate_bias(stats, exploration_count)
-    stats.variance[exploration_count] = variance_estimate_error(stats, exploration_count)
+end
+
+function update_variance!(stats::EstimatorStats)
+  for i in 1:length(stats.visit_variance)
+    stats.visit_variance[i] = variance(stats, i)
   end
   for choice in stats.tree.choices
-    estimator = choice.reward_estimator
-    estimator.mode = mode(estimator)
-    estimator.variance = variance(estimator)
-    estimator.mean = mean(estimator)
+    choice.reward_estimator.variance = variance(choice.reward_estimator)
+    choice.reward_estimator.mean = mean(choice.reward_estimator)
   end
+end
+
+function variance(stats::EstimatorStats, estimate_count::Int)
+  sum = 0
+  count = 0
+  for choice in stats.tree.choices
+    if estimate_count + 1 > length(choice.reward_estimator.values)
+      continue
+    end
+    # Compute the change in debiased esimate.
+    # Since it is debiased, the mean of that change should be zero.
+    before = choice.reward_estimator.values[estimate_count+0] + stats.bias[estimate_count+0]
+    after  = choice.reward_estimator.values[estimate_count+1] + stats.bias[estimate_count+1]
+    sum += (after - before)^2
+    count += 1
+  end
+  if count == 0
+    return 0
+  end
+  return sum / count
 end
 
 mutable struct Estimator <: AbstractEstimator
@@ -579,10 +561,13 @@ function mode(estimator::Estimator)::Float64
   return estimator.latest_value + estimator.stats.bias[length(estimator.values)]
 end
 
-# Variance for the estimated reward.
-# Var(latest_value + bias) = Var(bias).
+# Variance for the estimated play reward after a single exploration,
+# based on fluctuations between this estimate count and the one before.
 function variance(estimator::Estimator)::Float64
-  return estimator.stats.variance[length(estimator.values)]
+  if length(estimator.values) <= 1
+    return estimator.stats.visit_variance[length(estimator.values)]
+  end
+  return estimator.stats.visit_variance[length(estimator.values)-1]
 end
 
 # Can be used to compute the expected value assuming a Gumbel distribution.
@@ -594,31 +579,48 @@ end
 
 function add_estimate!(estimator::Estimator, value::Float64)
   push!(estimator.values, value)
+  estimate_count = length(estimator.values)
+  visit_bias_sample = value - estimator.latest_value
   estimator.latest_value = value
-  bias_idx = min(length(estimator.values), length(estimator.stats.bias))
-  if bias_idx == 0
-    estimator.mode = estimator.latest_value
-  else
-    bias = estimator.stats.bias[bias_idx]
-    estimator.mode = estimator.latest_value + bias
-  end
-  estimator.mean = mean(estimator)
 
-  # Update the error distribution.
-  update_error!(estimator.stats, length(estimator.values))
+  while length(estimator.stats.visit_bias) < estimate_count
+    append_exploration!(estimator.stats)
+  end
+
+  if estimate_count > 1
+    # Update statistical bias between the two exploration counts.
+    estimator.stats.visits[estimate_count-1] += 1
+    visit_bias = estimator.stats.visit_bias[estimate_count-1]
+    estimator.stats.visit_bias[estimate_count-1] =
+      streamed_mean(visit_bias, visit_bias_sample, estimator.stats.visits[estimate_count-1])
+  end
+
+  # Update bias from exploration counts before this one and the latest one.
+  if estimate_count == length(estimator.stats.bias)
+    estimator.stats.bias[estimate_count] = estimator.stats.visit_bias[estimate_count]
+  end
+  for i in estimate_count-1:-1:1
+    estimator.stats.bias[i] = estimator.stats.bias[i+1] + estimator.stats.visit_bias[i]
+  end
+
+  estimator.mode = mode(estimator)
+  update_estimator_modes!(estimator.stats)
+  update_variance!(estimator.stats)
 end
 
 function string(estimator::Estimator)
+  visit_bias = estimator.stats.visit_bias
   bias = estimator.stats.bias
-  variance = estimator.stats.variance
+  visit_variance = estimator.stats.visit_variance
   return string(
     @sprintf("lat=%.4f", estimator.latest_value),
     @sprintf(" mod=%.4f", estimator.mode),
     @sprintf(" mea=%.4f", estimator.mean),
     @sprintf(" dev=%.4f", sqrt(estimator.variance)),
-    " val=…", join(map(v -> @sprintf("%.4f", v), estimator.values[max(1, length(estimator.values)-10):length(estimator.values)]), ","),
-    " bia=…", join(map(v -> @sprintf("%.4f", v), bias[max(1, length(bias)-10):length(bias)]), ","),
-    " dev=…", join(map(v -> @sprintf("%.4f", sqrt(v)), variance[max(1, length(variance)-10):length(variance)]), ","),
+    " val=", join(map(v -> @sprintf("%.4f", v), estimator.values[1:min(10, length(estimator.values))]), "…,"),
+    " vbi=", join(map(v -> @sprintf("%.4f", v), visit_bias[1:min(10, length(visit_bias))]), "…,"),
+    " bia=", join(map(v -> @sprintf("%.4f", v), bias[1:min(1, length(bias))]), "…,"),
+    " dev=", join(map(v -> @sprintf("%.4f", sqrt(v)), visit_variance[1:min(10, length(visit_variance))]), "…,"),
   )
 end
 
