@@ -388,7 +388,6 @@ mutable struct Tree <: AbstractTree
   choices::Vector{Choice}
   choice_from_guess::Dict{Vector{UInt8}, Choice}
   best_choice::Union{Choice, Nothing}
-  second_best_choice::Union{Choice, Nothing}
   # Best known choice based on the known lower bound explored.
   best_choice_lower_bound::Union{Choice, Nothing}
   nsolutions::Int
@@ -448,14 +447,13 @@ function Tree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}}, 
   if nsols == 1
     choice = Choice(solutions[1])
     best_choice = choice
-    second_best_choice = choice
     best_choice_lower_bound = choice
     visits = 0
     sum_prob_optimal = choice.prob_optimal
     newest_choice = nothing
     last_non_cache_visit = -1
     estimator_stats = EstimatorStats()
-    tree = Tree(previous_choice, constraint, [choice], Dict([(choice.guess, choice)]), best_choice, second_best_choice, best_choice_lower_bound, nsols, visits, newest_choice, estimator_stats)
+    tree = Tree(previous_choice, constraint, [choice], Dict([(choice.guess, choice)]), best_choice, best_choice_lower_bound, nsols, visits, newest_choice, estimator_stats)
     choice.tree = tree
     estimator_stats.tree = tree
     return tree
@@ -466,7 +464,7 @@ function Tree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}}, 
   newest_choice = nothing
   last_non_cache_visit = -1
   estimator_stats = EstimatorStats()
-  tree = Tree(previous_choice, constraint, [], Dict{Vector{UInt8}, Choice}(), nothing, nothing, nothing, nsols, visits, newest_choice, estimator_stats)
+  tree = Tree(previous_choice, constraint, [], Dict{Vector{UInt8}, Choice}(), nothing, nothing, nsols, visits, newest_choice, estimator_stats)
   estimator_stats.tree = tree
   add_choice_from_best_uncached_action!(tree, guesses, solutions)
   if isnothing(tree.best_choice)
@@ -1173,11 +1171,7 @@ end
 
 function update_best_choices!(choice::Choice, new_lower_bound::Float64)
   tree = choice.tree
-  #if choice.reward_estimator.debiased > tree.best_choice.reward_estimator.debiased
-  if choice.value.debiased > tree.best_choice.value.debiased
-    tree.second_best_choice = tree.best_choice
-    tree.best_choice = choice
-  end
+  tree.best_choice = tree.choices[argmax(choice.value.debiased for choice in tree.choices)]
 
   old_tree_best_lower_bound = tree.best_choice_lower_bound.best_lower_bound
   if new_lower_bound > choice.best_lower_bound
@@ -1345,9 +1339,6 @@ function add_choice_from_best_uncached_action!(
   if length(tree.choices) == 0
     tree.best_choice = choice
     tree.best_choice_lower_bound = choice
-    tree.second_best_choice = choice
-  elseif length(tree.choices) == 1
-    tree.second_best_choice = choice
   end
   push!(tree.choices, choice)
   tree.choice_from_guess[choice.guess] = choice
@@ -1512,7 +1503,7 @@ function average_remaining_solutions_after_guess(guess::Vector{UInt8}, solutions
 end
 
 function Base.show(io::IO, tree::Tree)
-  println(io, "Best: ", str_from_word(tree.best_choice.guess), ", second best: ", str_from_word(tree.second_best_choice.guess))
+  println(io, "Best: ", str_from_word(tree.best_choice.guess))
   #println(io, "tree.sum_prob_optimal = ", tree.sum_prob_optimal)
   #println(io, "tree.slopes = ", join(map(s -> @sprintf("%.3f", s), tree.differentials.slopes[1:min(10, length(tree.differentials.slopes))]), ", "))
   println(io, "tree.visits = ", tree.visits)
