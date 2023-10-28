@@ -698,13 +698,15 @@ end
 # we update the tree-level statistics associated with them.
 function update_tree_stats!(choice::Choice, new_tree_estimate::Float64)
   old_tree_estimate = choice.value.tree_estimate
-  old_debiased_estimate = choice.value.debiased
   tree = choice.tree
   resize_tree_stats!(tree, choice.visits)
   tree.estimator_stats.actions_with_visits[choice.visits+1] += 1
   update_tree_visit_bias!(choice, old_tree_estimate, new_tree_estimate)
   update_tree_bias!(tree)
-  update_tree_bias_variance!(choice, old_debiased_estimate, choice.value.debiased)
+
+  old_debiased_estimate = choice.value.debiased
+  new_debiased_estimate = debiased(new_tree_estimate, choice.visits, choice.tree)
+  update_tree_bias_variance!(choice, old_debiased_estimate, new_debiased_estimate)
 end
 
 # Ensure that the stats vectors have enough slots to avoid out-of-bound errors.
