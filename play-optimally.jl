@@ -373,7 +373,7 @@ mutable struct Choice
   # Constraint that Wordle may yield as a response to this guess.
   # We link it lazily to the next choice we make in the tree search.
   visits::Int
-  #last_visit::Int  # Number of tree visits during last exploration.
+  last_visit::Int  # Number of tree visits during last exploration.
   #visits_with_improvement::Int
 
   #measurement::ConvergingMeasurement
@@ -407,11 +407,11 @@ function Choice(guess::Vector{UInt8})::Choice
   #prob_improvement = 0
   #exploratory_reward = 0
   visits = 0
-  #last_visit = -1
+  last_visit = -1
   #visits_with_improvement = 0
   #reward_estimator = nothing
   constraints = nothing
-  Choice(tree, guess, best_lower_bound, value, prob_optimal, visits, constraints)
+  Choice(tree, guess, best_lower_bound, value, prob_optimal, visits, last_visit, constraints)
 end
 
 function Choice(tree::Tree, guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}}, value_estimate::Float64)::Choice
@@ -422,12 +422,12 @@ function Choice(tree::Tree, guess::Vector{UInt8}, solutions::Vector{Vector{UInt8
   #prob_improvement = 1
   #exploratory_reward = 1
   visits = 0
-  #last_visit = -1
+  last_visit = -1
   #visits_with_improvement = 0
   #reward_estimator = Estimator(tree.estimator_stats)
   #add_estimate!(reward_estimator, value_estimate)
   constraints = nothing
-  return Choice(tree, guess, best_lower_bound, value, prob_optimal, visits, constraints)
+  return Choice(tree, guess, best_lower_bound, value, prob_optimal, visits, last_visit, constraints)
 end
 
 function Base.show(io::IO, choice::Choice)
@@ -438,6 +438,7 @@ function Base.show(io::IO, choice::Choice)
     @sprintf("%.4f", -choice.value.debiased), "±",
     @sprintf("%.4f", sqrt(debiased_variance(choice))), "; ",
     @sprintf("o=%d%%", round(choice.prob_optimal * 100)), "; ",
+    "lv=", choice.last_visit, "; ",
     "v=", choice.visits)
 end
 
@@ -504,7 +505,7 @@ EstimatorStats() = EstimatorStats([], [], [], [], [], [], nothing)
 function Base.show(io::IO, stats::EstimatorStats)
   println(io, "visits\tactions_with_visits\tvisit_bias\tbias\tdebiased_delta\tbias_variance_t\tbias_variance")
   for i = 1:length(stats.bias)
-    println(io, @sprintf("%d\t%d\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f",
+    println(io, @sprintf("%d\t%d\t%.4f\t%.4f\t%.6f\t%.15f\t%.15f",
       i-1,
       stats.actions_with_visits[i],
       stats.visit_bias[i],
@@ -653,6 +654,7 @@ end
 
 function update_action_value!(choice::Choice, tree_estimate::Float64)
   choice.visits += 1
+  choice.last_visit = choice.tree.visits
   choice.tree.visits += 1
   update_tree_stats!(choice, tree_estimate)
   choice.value.tree_estimate = tree_estimate
@@ -1004,7 +1006,7 @@ end
 # Select a choice in proprotion to the probability that it is optimal.
 function choice_from_thompson_sampling(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
   update_prob_optimal!(tree)
-  fair_thompson_sample(tree, solutions, guesses)
+  probabilist_thompson_sample(tree, solutions, guesses)
 end
 
 function update_prob_optimal!(tree::Tree)
@@ -1044,15 +1046,18 @@ function sample_action_value(choice::Choice)::Float64
   return rand(Gumbel(mode, scale))
 end
 
-# Pick the choice based on fair total expanded work:
-# a choice that has a 40% chance of being optimal
-# should be explored until 40% of all historical explorations is theirs.
-# We assume that the sum of prob_optimal across choices is 1.
-function fair_thompson_sample(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
+# Pick choices so that the frequency that they are picked at, matches their
+# probability of being the optimal action.
+function probabilist_thompson_sample(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
+  # The set of probabilities is a pie chart,
+  # and on this pie wheel, we randomly run a pointer.
+  rand_pointer = rand()
+  cum_prob = 0.0
   for (i, choice) in enumerate(tree.choices)
-    if choice.visits < tree.visits * choice.prob_optimal
+    cum_prob += choice.prob_optimal
+    if rand_pointer <= cum_prob
       if isnothing(tree.previous_choice)
-        println("Selected ", choice)
+        println("Selected ", choice, " (rand_pointer=", rand_pointer, ")")
         println(tree)
       end
       # If we pick the newest choice, we uncache a choice.
@@ -1071,6 +1076,60 @@ function fair_thompson_sample(tree::Tree, solutions::Vector{Vector{UInt8}}, gues
   end
   return choice, idx
 end
+
+# Pick choices so that the frequency that they are picked at, matches their
+# probability of being the optimal action.
+#function frequentist_thompson_sample(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
+#  for (i, choice) in enumerate(tree.choices)
+#    if choice.prob_optimal * (tree.visits - choice.last_visit) >= 1
+#      if isnothing(tree.previous_choice)
+#        println("Selected ", choice)
+#        println(tree)
+#      end
+#      # If we pick the newest choice, we uncache a choice.
+#      if choice == tree.newest_choice
+#        add_choice_from_best_uncached_action!(tree, guesses, solutions)
+#      end
+#      return choice, i
+#    end
+#  end
+#  # If a choice has not been selected yet, we pick the newest one.
+#  idx = length(tree.choices)
+#  choice = tree.choices[idx]
+#  # If we pick the newest choice, we uncache a choice.
+#  if choice == tree.newest_choice
+#    add_choice_from_best_uncached_action!(tree, guesses, solutions)
+#  end
+#  return choice, idx
+#end
+
+# Pick the choice based on fair total expanded work:
+# a choice that has a 40% chance of being optimal
+# should be explored until 40% of all historical explorations is theirs.
+# We assume that the sum of prob_optimal across choices is 1.
+#function fair_thompson_sample(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
+#  for (i, choice) in enumerate(tree.choices)
+#    if choice.visits < tree.visits * choice.prob_optimal
+#      if isnothing(tree.previous_choice)
+#        println("Selected ", choice)
+#        println(tree)
+#      end
+#      # If we pick the newest choice, we uncache a choice.
+#      if choice == tree.newest_choice
+#        add_choice_from_best_uncached_action!(tree, guesses, solutions)
+#      end
+#      return choice, i
+#    end
+#  end
+#  # If a choice has not been selected yet, we pick the newest one.
+#  idx = length(tree.choices)
+#  choice = tree.choices[idx]
+#  # If we pick the newest choice, we uncache a choice.
+#  if choice == tree.newest_choice
+#    add_choice_from_best_uncached_action!(tree, guesses, solutions)
+#  end
+#  return choice, idx
+#end
 
 
 # Return the choice (and its index in the cache) that will produce the highest
