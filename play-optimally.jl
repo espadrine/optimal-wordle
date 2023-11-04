@@ -491,28 +491,29 @@ mutable struct EstimatorStats <: AbstractEstimatorStats
   visit_bias::Vector{Float64}
   # The overall bias from one estimate count, to the latest estimate.
   bias::Vector{Float64}
-  # Delta between a debiased action-value at N-1 visits and at N visits.
-  debiased_delta::Vector{Float64}
-  bias_variance_t::Vector{Float64}  # Variance times the visit count.
-  # The variance of the bias after N-1 visits.
-  bias_variance::Vector{Float64}
+  # Variance of the difference between the debiased estimate after the Nth visit
+  # and the N-1 visit, times the number of samples. To allow streaming computation.
+  debiased_delta_variance_t::Vector{Float64}
+  # The variance of the debiased estimator after N-1 visits.
+  # It represents the uncertainty of its value,
+  # thus works like a mean squared error compared to the true action value.
+  debiased_variance::Vector{Float64}
   #init_variance::Float64
   tree::Union{Tree, Nothing}
 end
 
-EstimatorStats() = EstimatorStats([], [], [], [], [], [], nothing)
+EstimatorStats() = EstimatorStats([], [], [], [], [], nothing)
 
 function Base.show(io::IO, stats::EstimatorStats)
-  println(io, "visits\tactions_with_visits\tvisit_bias\tbias\tdebiased_delta\tbias_variance_t\tbias_variance")
+  println(io, "visits\tactions_with_visits\tvisit_bias\tbias\tdebiased_delta_variance_t\tdebiased_variance")
   for i = 1:length(stats.bias)
-    println(io, @sprintf("%d\t%d\t%.4f\t%.4f\t%.6f\t%.15f\t%.15f",
+    println(io, @sprintf("%d\t%d\t%.4f\t%.4f\t%.15f\t%.15f",
       i-1,
       stats.actions_with_visits[i],
       stats.visit_bias[i],
       stats.bias[i],
-      stats.debiased_delta[i],
-      stats.bias_variance_t[i],
-      stats.bias_variance[i]))
+      stats.debiased_delta_variance_t[i],
+      stats.debiased_variance[i]))
   end
 end
 
@@ -685,11 +686,11 @@ function bias_variance_from_visit_to_end(tree::Tree, visits::Int)::Float64
   # (because the current visit count is the max one,
   # so there is no delta to the next visit estimate),
   # we consider the latest bias.
-  last_idx = lastindex(tree.estimator_stats.bias_variance)
+  last_idx = lastindex(tree.estimator_stats.debiased_variance)
   if last_idx == 0
     return tree.best_choice.value.debiased^2
   end
-  return tree.estimator_stats.bias_variance[min(visits+1, last_idx)]
+  return tree.estimator_stats.debiased_variance[min(visits+1, last_idx)]
 end
 
 function debiased_variance(choice::Choice)::Float64
@@ -717,9 +718,8 @@ function resize_tree_stats!(tree::Tree, visits::Int)
   actions_with_visits = stats.actions_with_visits
   visit_bias = stats.visit_bias
   bias = stats.bias
-  debiased_delta = stats.debiased_delta
-  bias_variance_t = stats.bias_variance_t
-  bias_variance = stats.bias_variance
+  debiased_delta_variance_t = stats.debiased_delta_variance_t
+  debiased_variance = stats.debiased_variance
   while length(actions_with_visits) < visits+1
     push!(actions_with_visits, 0)
   end
@@ -729,27 +729,19 @@ function resize_tree_stats!(tree::Tree, visits::Int)
   while length(bias) < visits
     push!(bias, 0)
   end
-  while length(debiased_delta) < visits
-    push!(debiased_delta, 0)
+  while length(debiased_delta_variance_t) < visits
+    push!(debiased_delta_variance_t, 0)
   end
-  while length(bias_variance_t) < visits
-    push!(bias_variance_t, 0)
-  end
-  while length(bias_variance) < visits
-    push!(bias_variance, 0)
+  while length(debiased_variance) < visits
+    push!(debiased_variance, 0)
   end
 end
 
 function update_tree_visit_bias!(choice::Choice, old_action_value::Float64, action_value::Float64)
   visit_bias = choice.tree.estimator_stats.visit_bias
   v = choice.visits
-  visit_count = choice.tree.estimator_stats.actions_with_visits[v]
-  visit_bias[v] = if visit_count > 1
-    streamed_mean(visit_bias[v], action_value - old_action_value, visit_count)
-  else  # If this is the first visit, visit_count was just incremented to 1.
-    # We don't want the default 0 value to be taken as a value in the mean.
-    action_value - old_action_value
-  end
+  action_count = choice.tree.estimator_stats.actions_with_visits[v]
+  visit_bias[v] = streamed_mean(visit_bias[v], action_value - old_action_value, action_count)
 end
 
 function update_tree_bias!(tree::Tree)
@@ -760,7 +752,7 @@ function update_tree_bias!(tree::Tree)
   fill!(bias, 0)
   # The loop will not set the last value, so we must do so explicitly.
   bias[lastindex(bias)] = visit_bias[lastindex(bias)]
-  # The following loop uses a recurrence but works ontil till the last.
+  # The following loop uses a recurrence but works from last to first.
   for visits = lastindex(bias)-2:-1:0
     bias[visits+1] = visit_bias[visits+1] + bias[visits+2]
   end
@@ -773,25 +765,39 @@ end
 
 function update_tree_bias_variance!(choice::Choice, old_debiased_estimate::Float64, new_debiased_estimate::Float64)
   stats = choice.tree.estimator_stats
-  debiased_delta = stats.debiased_delta
-  bias_variance_t = stats.bias_variance_t
-  bias_variance = stats.bias_variance
+  debiased_delta_variance_t = stats.debiased_delta_variance_t
+  debiased_variance = stats.debiased_variance
   v = choice.visits
-  visit_count = choice.tree.estimator_stats.actions_with_visits[v]
+  action_count = choice.tree.estimator_stats.actions_with_visits[v]
 
+  # The estimator for the variance of the debiased action value estimate
+  # after n visits, across actions A is:
+  # Σa∈A (debiased(a, n) - action_value(a))² ÷ (a-1)
+  # = Σa (action_value(a) - Σ[k=n→∞] Δdebiased(a) - action_value(a))² ÷ (a-1)
+  #   where Δdebiased(a) = debiased(a, n+1) - debiased(a, n)
+  #   because debiased(a, n) converges to action_value(a) as n → ∞
+  #   thus debiased(a, n) + Σ[k=n→∞] (debiased(a, k+1) - debiased(a, k)) = action_value(a)
+  # = var(ΣΔdebiased)  since 𝔼Δdebiased = 0 as it is debiased.
+  # = Σvar(Δdebiased)  since they are mostly uncorrelated.
   delta = new_debiased_estimate - old_debiased_estimate
-  old_delta_mean = debiased_delta[v]
+  debiased_delta_variance_t[v] += delta^2
 
-  # If this is the first visit, visit_count was just incremented to 1.
-  # For the delta, we do want the default 0 value to be taken in the mean,
-  # since it is part of the unexpected deviation.
-  debiased_delta[v] = streamed_mean(old_delta_mean, delta, visit_count)
-  bias_variance_t[v] = streamed_variance_times_count(bias_variance_t[v], old_delta_mean, debiased_delta[v], delta)
-  bias_variance[v] = if visit_count > 1
+  # Reset the variance to match the delta variance.
+  for v = 1:length(debiased_variance)
+    action_count = choice.tree.estimator_stats.actions_with_visits[v]
     # Unbiased estimator for the variance, using the Bessel correction.
-    bias_variance_t[v] / (visit_count - 1)
-  else  # To avoid a division by zero, we don’t use Bessel correction.
-    bias_variance_t[v]
+    # Since the count is action_count+1,
+    # removing 1 for Bessel correction yields action_count:
+    debiased_variance[v] = if action_count > 1
+      debiased_delta_variance_t[v] / (action_count - 1)
+    else  # To avoid a division by zero, we don’t use Bessel correction.
+      debiased_delta_variance_t[v]
+    end
+  end
+
+  # The real debiased variance sums the delta variances.
+  for v = length(debiased_variance)-1:-1:1
+    debiased_variance[v] += debiased_variance[v+1]
   end
 end
 
@@ -830,8 +836,8 @@ end
 #
 #  # Now that we can compare biased estimates to their debiased counterpart,
 #  # let’s use that to compute the variance of the bias.
-#  bias_variance = tree.estimator_stats.bias_variance
-#  for visits = 0:length(bias_variance)-1
+#  debiased_variance = tree.estimator_stats.debiased_variance
+#  for visits = 0:length(debiased_variance)-1
 #    sum = 0.0
 #    count = 0
 #    for choice in tree.choices
@@ -841,7 +847,7 @@ end
 #        count += 1
 #      end
 #    end
-#    bias_variance[visits+1] = sum / count
+#    debiased_variance[visits+1] = sum / count
 #  end
 #end
 
