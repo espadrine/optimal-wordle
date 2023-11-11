@@ -16,8 +16,8 @@ function main()
   tree = Tree(allowed_guesses, remaining_solutions, nothing, UInt8(0))
   while length(remaining_solutions) > 1
     step = 0
-    if length(remaining_solutions) == 2315
-      @time while tree.best_choice.best_lower_bound < -3.4212
+    if length(remaining_solutions) == 3158
+      @time while tree.best_choice.best_lower_bound < -3.5526
         add_time(computation_timers.improve, @elapsed improve!(tree, remaining_solutions, allowed_guesses))
         step += 1
 
