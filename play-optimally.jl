@@ -1051,8 +1051,24 @@ function sample_action_value(choice::Choice)::Float64
     #println("Warning: sample_action_value: zero variance for choice ", choice)
     return mode
   end
-  scale = sqrt(variance * (6/pi^2))
-  return rand(Gumbel(mode, scale))
+  # Ablation study: a Gaussian increases the optimal prob of the top choice
+  # yet it ensures the next top choices have more visits as well
+  # (despite them having a lower optimal proability).
+  # The Gumbel suggests the best choice as optimal after 80 steps
+  # instead of 96 for the Normal. However:
+  # ┌─────────────┬───────────────────────┐
+  # │ Lower bound │  Number of steps to   │
+  # │             │ find that lower bound │
+  # │             ├──────────┬────────────┤
+  # │             │ Gaussian │   Gumbel   │
+  # ├─────────────┼──────────┼────────────┤
+  # │      3.5535 │      752 │       2864 │
+  # │      3.5532 │     1744 │       5040 │
+  # │      3.5529 │     8336 │        OOM │
+  # └─────────────┴──────────┴────────────┘
+  return rand(Normal(mode, sqrt(variance)))
+  #scale = sqrt(variance * (6/pi^2))
+  #return rand(Gumbel(mode, scale))
 end
 
 # Pick choices so that the frequency that they are picked at, matches their
