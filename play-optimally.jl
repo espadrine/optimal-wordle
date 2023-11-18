@@ -894,8 +894,7 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
 
   # Select the next choice based on the optimal-converging policy
   add_time(computation_timers.select_choice, @elapsed begin
-    choice = best_exploratory_choice(tree, solutions, guesses)
-    partial_action_sort!(tree)
+    choice, choice_idx = best_exploratory_choice!(tree, solutions, guesses)
   end)
   #init_exploratory_reward = choice.exploratory_reward
   #init_estimate_latest = choice.reward_estimator.mean
@@ -966,7 +965,7 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
   #add_time(computation_timers.update_prob_explore, @elapsed begin
   #  update_prob_explore!(tree)
   #end)
-  update_best_choices!(choice, new_guesses_remaining)
+  update_best_choices!(choice, choice_idx, new_guesses_remaining)
   if nsolutions == 2315
   #if !isnothing(findfirst(s -> str_from_word(s) == "vowel", solutions))
     #println("First choice optimal prob: ", tree.choices[1].prob_optimal)
@@ -988,32 +987,18 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
     #println("After exploration: ", string(choice.reward_estimator))
     println()
   end
-  return choice.best_lower_bound
-end
-
-# Sort actions to have the best one first, per debiased action value.
-# It does only a single pass of bubble sort, for O(actions) execution.
-function partial_action_sort!(tree::Tree)
-  for i = length(tree.choices)-1:-1:1
-    current_choice = tree.choices[i]
-    next_choice = tree.choices[i+1]
-    if current_choice.value.debiased < next_choice.value.debiased
-      tree.choices[i+1] = current_choice
-      tree.choices[i] = next_choice
-    end
-  end
 end
 
 # Pick the choice that is most valuable to explore.
-function best_exploratory_choice(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Choice
-  return choice_from_thompson_sampling(tree, solutions, guesses)
+function best_exploratory_choice!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
+  return choice_from_thompson_sampling!(tree, solutions, guesses)
   # Ablation study: using exploratory reward yields too much sensitivity to
   # optimal choices incorrectly assessed as unimprovable.
   #return choice_with_max_expected_exploratory_reward(tree, solutions, guesses)
 end
 
 # Select a choice in proprotion to the probability that it is optimal.
-function choice_from_thompson_sampling(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Choice
+function choice_from_thompson_sampling!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
   update_prob_optimal!(tree)
   return probabilist_thompson_sample(tree, solutions, guesses)
 end
@@ -1073,12 +1058,12 @@ end
 
 # Pick choices so that the frequency that they are picked at, matches their
 # probability of being the optimal action.
-function probabilist_thompson_sample(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Choice
+function probabilist_thompson_sample(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
   # The set of probabilities is a pie chart,
   # and on this pie wheel, we randomly run a pointer.
   rand_pointer = rand()
   cum_prob = 0.0
-  for choice in tree.choices
+  for (choice_idx, choice) in enumerate(tree.choices)
     cum_prob += choice.prob_optimal
     if rand_pointer <= cum_prob
       if isnothing(tree.previous_choice)
@@ -1089,16 +1074,17 @@ function probabilist_thompson_sample(tree::Tree, solutions::Vector{Vector{UInt8}
       if choice == tree.newest_choice
         add_choice_from_best_uncached_action!(tree, guesses, solutions)
       end
-      return choice
+      return choice, choice_idx
     end
   end
   # If a choice has not been selected yet, we pick the newest one.
-  choice = tree.choices[length(tree.choices)]
+  choice_idx = length(tree.choices)
+  choice = tree.choices[choice_idx]
   # If we pick the newest choice, we uncache a choice.
   if choice == tree.newest_choice
     add_choice_from_best_uncached_action!(tree, guesses, solutions)
   end
-  return choice
+  return choice, choice_idx
 end
 
 # Pick choices so that the frequency that they are picked at, matches their
@@ -1350,7 +1336,7 @@ end
 #  choice.tree.visits += 1
 #end
 
-function update_best_choices!(choice::Choice, new_lower_bound::Float64)
+function update_best_choices!(choice::Choice, choice_idx::Int, new_lower_bound::Float64)
   tree = choice.tree
   tree.best_choice = tree.choices[argmax(choice.value.debiased for choice in tree.choices)]
 
@@ -1362,7 +1348,7 @@ function update_best_choices!(choice::Choice, new_lower_bound::Float64)
     println("Improvement found: ", choice_breadcrumb(choice), " ",
             @sprintf("%.4f", old_tree_best_lower_bound), "→",
             @sprintf("%.4f", choice.best_lower_bound),
-            " (", tree.nsolutions, " sols)")
+            " (rank ", choice_idx, "; ", tree.nsolutions, " sols)")
     tree.best_choice_lower_bound = choice
   end
 end
