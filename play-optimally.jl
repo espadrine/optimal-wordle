@@ -18,8 +18,12 @@ function main()
     step = 0
     if length(remaining_solutions) == 3158
       @time while tree.best_choice.best_lower_bound < -3.5526
-        add_time(computation_timers.improve, @elapsed improve!(tree, remaining_solutions, allowed_guesses))
-        step += 1
+        add_time(computation_timers.improve, @elapsed begin
+          Threads.@threads for i = 1:Threads.nthreads()
+            improve!(tree, remaining_solutions, allowed_guesses)
+          end
+        end)
+        step += Threads.nthreads()
 
         choice = tree.best_choice
         println("Times: ", string(computation_timers))
@@ -397,6 +401,7 @@ mutable struct Tree <: AbstractTree
   #last_non_cache_visit::Int  # Visit count when we last included a guess in the list of choices.
   #differentials::ConvergingMeasurementDifferentials
   estimator_stats::AbstractEstimatorStats
+  lock::ReentrantLock
 end
 
 function Choice(guess::Vector{UInt8})::Choice
@@ -453,7 +458,8 @@ function Tree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}}, 
     newest_choice = nothing
     last_non_cache_visit = -1
     estimator_stats = EstimatorStats()
-    tree = Tree(previous_choice, constraint, [choice], Dict([(choice.guess, choice)]), best_choice, best_choice_lower_bound, nsols, visits, newest_choice, estimator_stats)
+    lock = ReentrantLock()
+    tree = Tree(previous_choice, constraint, [choice], Dict([(choice.guess, choice)]), best_choice, best_choice_lower_bound, nsols, visits, newest_choice, estimator_stats, lock)
     choice.tree = tree
     estimator_stats.tree = tree
     return tree
@@ -464,7 +470,8 @@ function Tree(guesses::Vector{Vector{UInt8}}, solutions::Vector{Vector{UInt8}}, 
   newest_choice = nothing
   last_non_cache_visit = -1
   estimator_stats = EstimatorStats()
-  tree = Tree(previous_choice, constraint, [], Dict{Vector{UInt8}, Choice}(), nothing, nothing, nsols, visits, newest_choice, estimator_stats)
+  lock = ReentrantLock()
+  tree = Tree(previous_choice, constraint, [], Dict{Vector{UInt8}, Choice}(), nothing, nothing, nsols, visits, newest_choice, estimator_stats, lock)
   estimator_stats.tree = tree
   add_choice_from_best_uncached_action!(tree, guesses, solutions)
   if isnothing(tree.best_choice)
@@ -884,7 +891,7 @@ computation_timers = ComputationTimers(ComputationTimer(0, 0), ComputationTimer(
 
 # Improve the policy by gathering data from using it with all solutions.
 # Returns the average number of guesses to win across all solutions.
-function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Float64
+function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})
   nsolutions = length(solutions)
   if nsolutions == 0
     return 0
@@ -892,6 +899,7 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
     return 1  # The last guess finds the right solution.
   end
 
+  lock(tree.lock)
   # Select the next choice based on the optimal-converging policy
   add_time(computation_timers.select_choice, @elapsed begin
     choice, choice_idx = best_exploratory_choice!(tree, solutions, guesses)
@@ -935,7 +943,9 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
         choice.constraints[constraint + 1] = subtree
       end)
     else
+      unlock(tree.lock)
       improve!(subtree, remaining_solutions, guesses)
+      lock(tree.lock)
     end
 
     ## Full-depth:
@@ -987,6 +997,7 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
     #println("After exploration: ", string(choice.reward_estimator))
     println()
   end
+  unlock(tree.lock)
 end
 
 # Pick the choice that is most valuable to explore.
