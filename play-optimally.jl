@@ -744,11 +744,11 @@ function resize_tree_stats!(tree::Tree, visits::Int)
   end
 end
 
-function update_tree_visit_bias!(choice::Choice, old_action_value::Float64, action_value::Float64)
+function update_tree_visit_bias!(choice::Choice, old_action_value::Float64, new_action_value::Float64)
   visit_bias = choice.tree.estimator_stats.visit_bias
   v = choice.visits
   action_count = choice.tree.estimator_stats.actions_with_visits[v]
-  visit_bias[v] = streamed_mean(visit_bias[v], action_value - old_action_value, action_count)
+  visit_bias[v] = streamed_mean(visit_bias[v], new_action_value - old_action_value, action_count)
 end
 
 function update_tree_bias!(tree::Tree)
@@ -893,10 +893,8 @@ computation_timers = ComputationTimers(ComputationTimer(0, 0), ComputationTimer(
 # Returns the average number of guesses to win across all solutions.
 function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})
   nsolutions = length(solutions)
-  if nsolutions == 0
-    return 0
-  elseif nsolutions == 1
-    return 1  # The last guess finds the right solution.
+  if nsolutions < 2  # The last guess finds the right solution.
+    return
   end
 
   lock(tree.lock)
@@ -1571,7 +1569,7 @@ function uncached_action_estimates(tree::Tree, guesses::Vector{Vector{UInt8}}, s
     if !isnothing(tree) && haskey(tree.choice_from_guess, guess)
       continue
     end
-    estimated_value = estimate_guesses_remaining(guess, solutions)
+    estimated_value = estimate_action_value(guess, solutions)
     if isinf(estimated_value)
       continue
     end
@@ -1617,7 +1615,7 @@ end
 #    if !isnothing(tree) && haskey(tree.choice_from_guess, guess)
 #      continue
 #    end
-#    optimal_estimate = estimate_guesses_remaining(guess, solutions)
+#    optimal_estimate = estimate_action_value(guess, solutions)
 #    if isinf(optimal_estimate)
 #      continue
 #    end
@@ -1662,7 +1660,47 @@ end
 #  return choice
 #end
 
-function estimate_guesses_remaining(guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}})
+function estimate_action_value(guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}})::Float64
+  # Ablation study:
+  # Empirically, the entropic estimator is worse,
+  # causing the untested action to be selected very often,
+  # even after thousands of iterations.
+  # However, after a while, confidence becomes reasonable,
+  # and it finds the optimal choice after 11953 steps,
+  # while the average estimator gets stuck on 3.5532 after 50K steps.
+  return -estimate_guesses_remaining_from_entropy(guess, solutions)
+  #return -estimate_guesses_remaining_from_avg(guess, solutions)
+end
+
+function estimate_guesses_remaining_from_entropy(guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}})::Float64
+  counts = zeros(Int, 243)  # Number of times the constraint appears across solutions.
+  for solution in solutions
+    @inbounds counts[constraints(guess, solution) + 1] += 1
+  end
+  nsols = length(solutions)
+
+  # Probability of a constraint appearing after we make this guess.
+  entropy = 0.0
+  for count in counts
+    if count == 0
+      continue
+    end
+    prob = count / nsols
+    entropy -= prob * log2(prob)
+  end
+
+  # Assuming we gain as many bits of information on each guess,
+  # initial_info = info_gained_per_guess * number_of_guesses.
+  prob_sol = if guess in solutions
+    1 / nsols  # If this pick is a winner, there are no more guesses to make.
+  else
+    0
+  end
+  expected_guesses = log2(nsols) / entropy
+  return prob_sol * 1 + (1-prob_sol) * (1 + expected_guesses)
+end
+
+function estimate_guesses_remaining_from_avg(guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}})::Float64
   avg_remaining = average_remaining_solutions_after_guess(guess, solutions)
   nsols = length(solutions)
   prob_sol = if guess in solutions
@@ -1673,16 +1711,16 @@ function estimate_guesses_remaining(guess::Vector{UInt8}, solutions::Vector{Vect
   # To estimate the number of remaining guesses n to win, we assume that we
   # maintain a constant ratio q of removed solutions after each guess.
   # We have s solutions currently, such that q^(n-1) = s. Thus n = 1 + log(s)÷log(q).
-  return -(1 + (prob_sol * 0 + (1-prob_sol) * (log(nsols) / log(nsols / avg_remaining))))
+  return 1 + (prob_sol * 0 + (1-prob_sol) * (log(nsols) / log(nsols / avg_remaining)))
 end
 
 # Compute the average remaining solutions for each guess.
-function average_remaining_solutions_after_guess(guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}})
+function average_remaining_solutions_after_guess(guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}})::Float64
   counts = zeros(Int, 243)
   for solution in solutions
     @inbounds counts[constraints(guess, solution) + 1] += 1
   end
-  sum(abs2, counts) / length(solutions)
+  return sum(abs2, counts) / length(solutions)
 end
 
 function Base.show(io::IO, tree::Tree)
