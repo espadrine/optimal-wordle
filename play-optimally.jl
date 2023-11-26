@@ -26,8 +26,12 @@ function main()
         step += Threads.nthreads()
 
         choice = tree.best_choice
-        println("Times: ", string(computation_timers))
-        println("Step ", step, ": We suggest ", choice)
+        if should_log(TIMINGS_LOG)
+          println("Times: ", string(computation_timers))
+        end
+        if should_log(STEP_LOG)
+          println("Step ", step, ": We suggest ", choice)
+        end
       end
     else
       @time for _ in 1:1000
@@ -35,8 +39,10 @@ function main()
         step += 1
 
         choice = tree.best_choice
-        print(ANSI_RESET_LINE)
-        println("Step ", step, ": We suggest ", choice)
+        if should_log(STEP_LOG)
+          print(ANSI_RESET_LINE)
+          println("Step ", step, ": We suggest ", choice)
+        end
       end
     end
     println()
@@ -974,25 +980,11 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
   #  update_prob_explore!(tree)
   #end)
   update_best_choices!(choice, choice_idx, new_guesses_remaining)
-  if nsolutions == 2315
-  #if !isnothing(findfirst(s -> str_from_word(s) == "vowel", solutions))
-    #println("First choice optimal prob: ", tree.choices[1].prob_optimal)
+  if should_log(DEPTH_LOG) && !isnothing(findfirst(s -> str_from_word(s) == "vowel", solutions))
     println("Explored ", choice_breadcrumb(choice), ": ", nsolutions, " sols (",
             @sprintf("%.4f", -init_best_lower_bound), "→",
             @sprintf("%.4f", -choice.best_lower_bound), ") ",
             choice)
-            #@sprintf("%.4f", -init_estimate_latest), "→",
-            #@sprintf("%.4f", -choice.value.debiased), "±",
-            #@sprintf("%.4f", sqrt(debiased_variance(choice))), "; ",
-            #@sprintf("%.4f", -choice.reward_estimator.mean), "∞→",
-            #@sprintf("%.4f", -choice.reward_estimator.debiased), "±",
-            #@sprintf("%.4f", sqrt(choice.reward_estimator.variance)), ";",
-            #@sprintf("e=%d", init_exploratory_reward), "→",
-            #@sprintf("%d", choice.exploratory_reward), ";",
-            #@sprintf("o=%d%%", round(choice.prob_optimal * 100)), "; ",
-            #@sprintf("i=%d%%", round(choice.prob_improvement * 100)), ";",
-            #"v=", choice.visits, ")")
-    #println("After exploration: ", string(choice.reward_estimator))
     println()
   end
   unlock(tree.lock)
@@ -1075,9 +1067,8 @@ function probabilist_thompson_sample(tree::Tree, solutions::Vector{Vector{UInt8}
   for (choice_idx, choice) in enumerate(tree.choices)
     cum_prob += choice.prob_optimal
     if rand_pointer <= cum_prob
-      if isnothing(tree.previous_choice)
-        println("Selected ", choice, " (rand_pointer=", rand_pointer, ")")
-        println(tree)
+      if isnothing(tree.previous_choice) && should_log(ACTION_SELECTION_LOG)
+        println("Selection rand_pointer=", rand_pointer)
       end
       # If we pick the newest choice, we uncache a choice.
       if choice == tree.newest_choice
@@ -1353,7 +1344,7 @@ function update_best_choices!(choice::Choice, choice_idx::Int, new_lower_bound::
   if new_lower_bound > choice.best_lower_bound
     choice.best_lower_bound = new_lower_bound
   end
-  if choice.best_lower_bound > old_tree_best_lower_bound
+  if choice.best_lower_bound > old_tree_best_lower_bound && should_log(IMPROVEMENT_LOG)
     println("Improvement found: ", choice_breadcrumb(choice), " ",
             @sprintf("%.4f", old_tree_best_lower_bound), "→",
             @sprintf("%.4f", choice.best_lower_bound),
@@ -1847,6 +1838,17 @@ function total_guesses_for_sol(tree::Tree, solution::Vector{UInt8}, guesses::Vec
     return 2    # We guessed wrong, but the next guess will be right.
   end
   return 1 + total_guesses_for_sol(choice.constraints[c + 1], solution, guesses, remaining_solutions)
+end
+
+# Log utilities
+const STEP_LOG = 1
+const TIMINGS_LOG = 2
+const IMPROVEMENT_LOG = 4
+const ACTION_SELECTION_LOG = 8
+const DEPTH_LOG = 16
+const ACTIVATED_LOGS = STEP_LOG | TIMINGS_LOG | IMPROVEMENT_LOG
+function should_log(log_level::Int)::Bool
+  return (ACTIVATED_LOGS & log_level) != 0
 end
 
 
