@@ -441,12 +441,22 @@ function Choice(tree::Tree, guess::Vector{UInt8}, solutions::Vector{Vector{UInt8
   return Choice(tree, guess, best_lower_bound, value, prob_optimal, visits, last_visit, constraints)
 end
 
+# Best estimate for the action value of that choice.
+function action_value(choice::Choice)::Float64
+  return choice.value.debiased
+end
+
+# Best estimate for the variance of the action value estimator.
+function action_value_variance(choice::Choice)::Float64
+  return bias_variance_from_visit_to_end(choice.tree, choice.visits)
+end
+
 function Base.show(io::IO, choice::Choice)
   print(io, str_from_word(choice.guess), " ",
     @sprintf("%.4f", -choice.best_lower_bound), ">",
     @sprintf("%.4f", -choice.value.estimate), "→",
     @sprintf("%.4f", -choice.value.tree_estimate), "→",
-    @sprintf("%.4f", -choice.value.debiased), "±",
+    @sprintf("%.4f", -action_value(choice)), "±",
     @sprintf("%.4f", sqrt(debiased_variance(choice))), "; ",
     @sprintf("o=%d%%", round(choice.prob_optimal * 100)), "; ",
     "lv=", choice.last_visit, "; ",
@@ -679,6 +689,8 @@ function debiased(choice::Choice)::Float64
   return debiased(choice.value.tree_estimate, choice.visits, choice.tree)
 end
 
+# The debiased action value estimator is the tree-based action value estimator,
+# plus a visit-dependent bias computed across actions in the node.
 function debiased(value_estimate::Float64, visits::Int, tree::Tree)::Float64
   return value_estimate + bias_from_visit_to_end(tree, visits)
 end
@@ -961,13 +973,15 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
     #end
     #improve!(subtree, remaining_solutions, guesses)
 
-    # For each solution, we made one guess, on top of the guesses left to end the game.
-    best_guesses_to_win += (subtree.best_choice.best_lower_bound - 1) * nrsols
+    reward = -1
+
     # FIXME: we should not use the most optimistic estimate,
     # but the expected estimate,
     # by weighing each expected play reward by the probability that it is optimal.
-    new_tree_optimal_estimate += (subtree.best_choice.value.debiased - 1) * nrsols
-    #new_tree_optimal_estimate += (subtree.best_choice.reward_estimator.mean - 1) * nrsols
+    new_tree_optimal_estimate += (reward + action_value(subtree.best_choice)) * nrsols
+
+    # For each solution, we made one guess, on top of the guesses left to end the game.
+    best_guesses_to_win += (reward + subtree.best_choice.best_lower_bound) * nrsols
   end
 
   # Update information about the current best policy.
@@ -1031,8 +1045,8 @@ end
 # Randomly pick an action value following a Gumbel distribution
 # using the debiased tree estimator as mode and the bias variance.
 function sample_action_value(choice::Choice)::Float64
-  mode = choice.value.debiased
-  variance = bias_variance_from_visit_to_end(choice.tree, choice.visits)
+  mode = action_value(choice)
+  variance = action_value_variance(choice)
   if variance == 0
     #println("Warning: sample_action_value: zero variance for choice ", choice)
     return mode
@@ -1338,7 +1352,7 @@ end
 
 function update_best_choices!(choice::Choice, choice_idx::Int, new_lower_bound::Float64)
   tree = choice.tree
-  tree.best_choice = tree.choices[argmax(choice.value.debiased for choice in tree.choices)]
+  tree.best_choice = tree.choices[argmax(action_value(choice) for choice in tree.choices)]
 
   old_tree_best_lower_bound = tree.best_choice_lower_bound.best_lower_bound
   if new_lower_bound > choice.best_lower_bound
