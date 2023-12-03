@@ -1006,10 +1006,18 @@ end
 
 # Pick the choice that is most valuable to explore.
 function best_exploratory_choice!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
-  return choice_from_thompson_sampling!(tree, solutions, guesses)
-  # Ablation study: using exploratory reward yields too much sensitivity to
+  #choice, idx = choice_from_thompson_sampling!(tree, solutions, guesses)
+  choice, idx = choice_from_ucb_laplace(tree, solutions, guesses)
+
+  # Using exploratory reward yields too much sensitivity to
   # optimal choices incorrectly assessed as unimprovable.
-  #return choice_with_max_expected_exploratory_reward(tree, solutions, guesses)
+  #choice = choice_with_max_expected_exploratory_reward(tree, solutions, guesses)
+
+  if isnothing(tree.previous_choice) && should_log(ACTION_SELECTION_LOG)
+    println("Selected ", choice, " (#", idx, ")")
+    println(tree)
+  end
+  return choice, idx
 end
 
 # Select a choice in proprotion to the probability that it is optimal.
@@ -1154,6 +1162,37 @@ end
 #  end
 #  return choice, idx
 #end
+
+function choice_from_ucb_laplace(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
+  best_idx = 1
+  best_choice = tree.choices[best_idx]
+  highest_bound = -Inf
+  for (i, choice) in enumerate(tree.choices)
+    bound = action_value_upper_bound_laplace(choice)
+    if isnothing(tree.previous_choice) && should_log(ACTION_SELECTION_LOG)
+      println("Studying bound=", bound, " for ", choice)
+    end
+    if bound > highest_bound
+      best_choice = choice
+      best_idx = i
+      highest_bound = bound
+    end
+  end
+  # If we pick the newest choice, we uncache a choice.
+  if best_choice == tree.newest_choice
+    add_choice_from_best_uncached_action!(tree, guesses, solutions)
+  end
+  return best_choice, best_idx
+end
+
+function action_value_upper_bound_laplace(choice::Choice)::Float64
+  # Laplace’s rule of succession is typically used for discrete possibilities.
+  # However, the idea can be applied to a continuous value.
+  # We rely on the effect of the perturbation of another sample
+  # with a fixed delta from the action value estimate.
+  delta = 0.1
+  return (action_value(choice) * choice.visits + action_value(choice) + delta) / (choice.visits+1)
+end
 
 
 # Return the choice (and its index in the cache) that will produce the highest
