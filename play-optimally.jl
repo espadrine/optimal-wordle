@@ -1006,8 +1006,21 @@ end
 
 # Pick the choice that is most valuable to explore.
 function best_exploratory_choice!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
+  # Ablation study:
+  # ┌─────────────┬────────────────────────────────┐
+  # │ Lower bound │ Number of steps to find it     │
+  # │   for best  ├──────────┬───────────┬─────────┤
+  # │    choice   │ Thompson │ Hoeffding │ Laplace │
+  # ├─────────────┼──────────┼───────────┼─────────┤
+  # │     <5.0000 │     9612 │       523 │    6010 │
+  # │     <4.0000 │    11190 │       544 │    6069 │
+  # │      3.5532 │    11953 │      2140 │    7642 │
+  # │      3.5526 │    11953 │           │    7946 │
+  # └─────────────┴──────────┴───────────┴─────────┘
+
   #choice, idx = choice_from_thompson_sampling!(tree, solutions, guesses)
-  choice, idx = choice_from_ucb_laplace(tree, solutions, guesses)
+  choice, idx = choice_from_ucb_hoeffding(tree, solutions, guesses)
+  #choice, idx = choice_from_ucb_laplace(tree, solutions, guesses)
 
   # Using exploratory reward yields too much sensitivity to
   # optimal choices incorrectly assessed as unimprovable.
@@ -1163,6 +1176,28 @@ end
 #  return choice, idx
 #end
 
+function choice_from_ucb_hoeffding(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
+  best_idx = 1
+  best_choice = tree.choices[best_idx]
+  highest_bound = -Inf
+  for (i, choice) in enumerate(tree.choices)
+    bound = action_value_upper_bound_hoeffding(choice)
+    if isnothing(tree.previous_choice) && should_log(ACTION_SELECTION_LOG)
+      println("Studying bound=", bound, " for ", choice)
+    end
+    if bound > highest_bound
+      best_choice = choice
+      best_idx = i
+      highest_bound = bound
+    end
+  end
+  # If we pick the newest choice, we uncache a choice.
+  if best_choice == tree.newest_choice
+    add_choice_from_best_uncached_action!(tree, guesses, solutions)
+  end
+  return best_choice, best_idx
+end
+
 function choice_from_ucb_laplace(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
   best_idx = 1
   best_choice = tree.choices[best_idx]
@@ -1183,6 +1218,27 @@ function choice_from_ucb_laplace(tree::Tree, solutions::Vector{Vector{UInt8}}, g
     add_choice_from_best_uncached_action!(tree, guesses, solutions)
   end
   return best_choice, best_idx
+end
+
+function action_value_upper_bound_hoeffding(choice::Choice)::Float64
+  # Hoeffding’s inequality states that, for a sum of n indpendent random variables
+  # ΣQ with L≤Qi≤U, Pr(ΣQ-𝔼[ΣQ]≥Δ) ≤ exp(-2Δ²÷(Σ(U-L)²))
+  # Assuming U and L are constants, Σ(U-L)² = n(U-L)².
+  # Also, since we are instead interested in the sample mean,
+  # we note that ΣQ-𝔼[ΣQ]≥Δ ⇒ ΣQ÷n-𝔼[ΣQ]÷n≥Δ÷n ⇒ μ̂-μ≥Δ÷n ⇒ μ≤μ̂-Δ÷n.
+  # Assuming the symmetry of the probability distribution,
+  # Pr(μ≤μ̂-Δ÷n) = Pr(μ≥μ̂+Δ÷n).
+  # Let’s set δ = Δ÷n, such that Δ = δ×n.
+  # Then we have:
+  # p := Pr(μ≥μ̂+δ) ≤ exp(-2nδ²÷(U-L)²).
+  # We then have δ = (U-L)×√(-log(p)÷(2n)).
+  # Experimental bounds for our action value are L=-5 and U=0.
+  # We can pick p = 0.05.
+  p_value = 0.999
+  upper_action_value = 0
+  lower_action_value = -5
+  factor = (upper_action_value - lower_action_value) * sqrt(-log(p_value)/2)
+  return action_value(choice) + factor * (choice.visits+1)^-0.5
 end
 
 function action_value_upper_bound_laplace(choice::Choice)::Float64
