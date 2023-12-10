@@ -926,23 +926,26 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
   #if nsolutions == 2315
   #  println("Before exploration: ", string(choice.reward_estimator))
   #end
-  best_guesses_to_win = 0  # Measured best, to update the best score.
-  new_tree_optimal_estimate = 0
+  action_value_lower_bound = 0.0  # Measured best, to update the best score.
+  new_action_value = 0.0
 
   # FIXME: speed improvement: loop through solutions if they are less numerous.
   for constraint in UInt8(0):UInt8(242)
     # State transition.
     remaining_solutions = filter_solutions_by_constraint(solutions, choice.guess, constraint)
     nrsols = length(remaining_solutions)
+    prob_trans = nrsols / nsolutions
+    reward = -1
+
     if nrsols == 0
       continue
     elseif nrsols == 1
       if constraint == 0xf2  # All characters are valid: we won in 1 guess.
-        new_tree_optimal_estimate -= 1
-        best_guesses_to_win -= 1
+        new_action_value += reward * prob_trans
+        action_value_lower_bound += reward * prob_trans
       else                   # The solution is found: we win on the next guess.
-        new_tree_optimal_estimate -= 2
-        best_guesses_to_win -= 2
+        new_action_value += 2 * reward * prob_trans
+        action_value_lower_bound += 2 * reward * prob_trans
       end
       continue
     end
@@ -973,28 +976,22 @@ function improve!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{
     #end
     #improve!(subtree, remaining_solutions, guesses)
 
-    reward = -1
-
-    # FIXME: we should not use the most optimistic estimate,
-    # but the expected estimate,
-    # by weighing each expected play reward by the probability that it is optimal.
-    new_tree_optimal_estimate += (reward + action_value(subtree.best_choice)) * nrsols
+    # Based on the Bellman optimality equation:
+    new_action_value += (reward + action_value(subtree.best_choice)) * prob_trans
 
     # For each solution, we made one guess, on top of the guesses left to end the game.
-    best_guesses_to_win += (reward + subtree.best_choice.best_lower_bound) * nrsols
+    action_value_lower_bound += (reward + subtree.best_choice.best_lower_bound) * prob_trans
   end
 
   # Update information about the current best policy.
-  new_guesses_remaining = best_guesses_to_win / nsolutions
-  new_tree_optimal_estimate /= nsolutions
   add_time(computation_timers.add_measurement, @elapsed begin
-    update_action_value!(choice, new_tree_optimal_estimate)
+    update_action_value!(choice, new_action_value)
   end)
   #add_time(computation_timers.update_prob_explore, @elapsed begin
   #  update_prob_explore!(tree)
   #end)
-  update_best_choices!(choice, choice_idx, new_guesses_remaining)
-  if should_log(DEPTH_LOG) && !isnothing(findfirst(s -> str_from_word(s) == "vowel", solutions))
+  update_best_choices!(choice, choice_idx, action_value_lower_bound)
+  if should_log(DEPTH_LOG) && !isnothing(findfirst(s -> str_from_word(s) == "rover", solutions))
     println("Explored ", choice_breadcrumb(choice), ": ", nsolutions, " sols (",
             @sprintf("%.4f", -init_best_lower_bound), "→",
             @sprintf("%.4f", -choice.best_lower_bound), ") ",
@@ -1012,14 +1009,14 @@ function best_exploratory_choice!(tree::Tree, solutions::Vector{Vector{UInt8}}, 
   # │   for best  ├──────────┬───────────┬─────────┤
   # │    choice   │ Thompson │ Hoeffding │ Laplace │
   # ├─────────────┼──────────┼───────────┼─────────┤
-  # │     <5.0000 │     9612 │       523 │    6010 │
-  # │     <4.0000 │    11190 │       544 │    6069 │
-  # │      3.5532 │    11953 │      2140 │    7642 │
-  # │      3.5526 │    11953 │           │    7946 │
+  # │     <5.0000 │     1260 │      4578 │    6010 │
+  # │     <4.0000 │     1603 │      4684 │    6069 │
+  # │      3.5532 │     2437 │      7796 │    7642 │
+  # │      3.5526 │     2437 │      8078 │    7946 │
   # └─────────────┴──────────┴───────────┴─────────┘
 
-  #choice, idx = choice_from_thompson_sampling!(tree, solutions, guesses)
-  choice, idx = choice_from_ucb_hoeffding(tree, solutions, guesses)
+  choice, idx = choice_from_thompson_sampling!(tree, solutions, guesses)
+  #choice, idx = choice_from_ucb_hoeffding(tree, solutions, guesses)
   #choice, idx = choice_from_ucb_laplace(tree, solutions, guesses)
 
   # Using exploratory reward yields too much sensitivity to
@@ -1036,7 +1033,34 @@ end
 # Select a choice in proprotion to the probability that it is optimal.
 function choice_from_thompson_sampling!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
   update_prob_optimal!(tree)
-  return probabilist_thompson_sample(tree, solutions, guesses)
+
+  # Ablation study: (entropic action value estimate)
+  # ┌─────────────┬───────────────────────────────────┐
+  # │ Lower bound │ Number of steps to find the bound │
+  # │   for best  ├─────────────┬─────────────┬───────┤
+  # │    choice   │ Probabilist │ Frequentist │  Fair │
+  # ├─────────────┼─────────────┼─────────────┼───────┤
+  # │     <5.0000 │        9612 │        1260 │   111 │
+  # │     <4.0000 │       11190 │        1603 │   130 │
+  # │      3.5532 │       11953 │        2437 │   369 │
+  # │      3.5526 │       11953 │        2437 │   646 │
+  # └─────────────┴─────────────┴─────────────┴───────┘
+
+  # Ablation study: (averaged action value estimate)
+  # ┌─────────────┬───────────────────────────────────┐
+  # │ Lower bound │ Number of steps to find the bound │
+  # │   for best  ├─────────────┬─────────────┬───────┤
+  # │    choice   │ Probabilist │ Frequentist │  Fair │
+  # ├─────────────┼─────────────┼─────────────┼───────┤
+  # │     <5.0000 │         162 │         224 │   229 │
+  # │     <4.0000 │         197 │         261 │   240 │
+  # │      3.5532 │        5817 │         599 │ 14546 │
+  # │      3.5526 │             │             │       │
+  # └─────────────┴─────────────┴─────────────┴───────┘
+
+  #return probabilist_thompson_sample(tree, solutions, guesses)
+  return frequentist_thompson_sample(tree, solutions, guesses)
+  #return fair_thompson_sample(tree, solutions, guesses)
 end
 
 function update_prob_optimal!(tree::Tree)
@@ -1124,57 +1148,49 @@ end
 
 # Pick choices so that the frequency that they are picked at, matches their
 # probability of being the optimal action.
-#function frequentist_thompson_sample(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
-#  for (i, choice) in enumerate(tree.choices)
-#    if choice.prob_optimal * (tree.visits - choice.last_visit) >= 1
-#      if isnothing(tree.previous_choice)
-#        println("Selected ", choice)
-#        println(tree)
-#      end
-#      # If we pick the newest choice, we uncache a choice.
-#      if choice == tree.newest_choice
-#        add_choice_from_best_uncached_action!(tree, guesses, solutions)
-#      end
-#      return choice, i
-#    end
-#  end
-#  # If a choice has not been selected yet, we pick the newest one.
-#  idx = length(tree.choices)
-#  choice = tree.choices[idx]
-#  # If we pick the newest choice, we uncache a choice.
-#  if choice == tree.newest_choice
-#    add_choice_from_best_uncached_action!(tree, guesses, solutions)
-#  end
-#  return choice, idx
-#end
+function frequentist_thompson_sample(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
+  for (i, choice) in enumerate(tree.choices)
+    if choice.prob_optimal * (tree.visits - choice.last_visit) >= 1
+      # If we pick the newest choice, we uncache a choice.
+      if choice == tree.newest_choice
+        add_choice_from_best_uncached_action!(tree, guesses, solutions)
+      end
+      return choice, i
+    end
+  end
+  # If a choice has not been selected yet, we pick the newest one.
+  idx = length(tree.choices)
+  choice = tree.choices[idx]
+  # If we pick the newest choice, we uncache a choice.
+  if choice == tree.newest_choice
+    add_choice_from_best_uncached_action!(tree, guesses, solutions)
+  end
+  return choice, idx
+end
 
 # Pick the choice based on fair total expanded work:
 # a choice that has a 40% chance of being optimal
 # should be explored until 40% of all historical explorations is theirs.
 # We assume that the sum of prob_optimal across choices is 1.
-#function fair_thompson_sample(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
-#  for (i, choice) in enumerate(tree.choices)
-#    if choice.visits < tree.visits * choice.prob_optimal
-#      if isnothing(tree.previous_choice)
-#        println("Selected ", choice)
-#        println(tree)
-#      end
-#      # If we pick the newest choice, we uncache a choice.
-#      if choice == tree.newest_choice
-#        add_choice_from_best_uncached_action!(tree, guesses, solutions)
-#      end
-#      return choice, i
-#    end
-#  end
-#  # If a choice has not been selected yet, we pick the newest one.
-#  idx = length(tree.choices)
-#  choice = tree.choices[idx]
-#  # If we pick the newest choice, we uncache a choice.
-#  if choice == tree.newest_choice
-#    add_choice_from_best_uncached_action!(tree, guesses, solutions)
-#  end
-#  return choice, idx
-#end
+function fair_thompson_sample(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
+  for (i, choice) in enumerate(tree.choices)
+    if choice.visits < tree.visits * choice.prob_optimal
+      # If we pick the newest choice, we uncache a choice.
+      if choice == tree.newest_choice
+        add_choice_from_best_uncached_action!(tree, guesses, solutions)
+      end
+      return choice, i
+    end
+  end
+  # If a choice has not been selected yet, we pick the newest one.
+  idx = length(tree.choices)
+  choice = tree.choices[idx]
+  # If we pick the newest choice, we uncache a choice.
+  if choice == tree.newest_choice
+    add_choice_from_best_uncached_action!(tree, guesses, solutions)
+  end
+  return choice, idx
+end
 
 function choice_from_ucb_hoeffding(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
   best_idx = 1
@@ -1457,7 +1473,7 @@ function update_best_choices!(choice::Choice, choice_idx::Int, new_lower_bound::
     println("Improvement found: ", choice_breadcrumb(choice), " ",
             @sprintf("%.4f", old_tree_best_lower_bound), "→",
             @sprintf("%.4f", choice.best_lower_bound),
-            " (rank ", choice_idx, "; ", tree.nsolutions, " sols)")
+            " (rank ", choice_idx, "; ", tree.nsolutions, " sols) ", choice)
     tree.best_choice_lower_bound = choice
   end
 end
@@ -1772,6 +1788,7 @@ function estimate_action_value(guess::Vector{UInt8}, solutions::Vector{Vector{UI
   #return -estimate_guesses_remaining_from_avg(guess, solutions)
 end
 
+# Including this guess, how many guesses remain until we win?
 function estimate_guesses_remaining_from_entropy(guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}})::Float64
   counts = zeros(Int, 243)  # Number of times the constraint appears across solutions.
   for solution in solutions
@@ -1779,30 +1796,38 @@ function estimate_guesses_remaining_from_entropy(guess::Vector{UInt8}, solutions
   end
   nsols = length(solutions)
 
-  # Probability of a constraint appearing after we make this guess.
   entropy = 0.0
   for count in counts
     if count == 0
       continue
     end
+    # Probability of a constraint appearing after we make this guess.
     prob = count / nsols
     entropy -= prob * log2(prob)
   end
 
   # Assuming we gain as many bits of information on each guess,
   # initial_info = info_gained_per_guess * number_of_guesses.
+  # Once there are zero bits of information,
+  # we know the solution for sure,
+  # but we still have to submit it as a guess in order to win.
+  expected_guesses = log2(nsols) / entropy + 1
+  # Probability that the guess wins directly,
+  # avoiding having to do another guess.
   prob_sol = if guess in solutions
-    1 / nsols  # If this pick is a winner, there are no more guesses to make.
+    1 / nsols
   else
     0
   end
-  expected_guesses = log2(nsols) / entropy
-  return prob_sol * 1 + (1-prob_sol) * (1 + expected_guesses)
+  return prob_sol * 1 + (1-prob_sol) * expected_guesses
 end
 
+# Including this guess, how many guesses remain until we win?
 function estimate_guesses_remaining_from_avg(guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}})::Float64
   avg_remaining = average_remaining_solutions_after_guess(guess, solutions)
   nsols = length(solutions)
+  # Probability that the guess wins directly,
+  # avoiding having to do another guess.
   prob_sol = if guess in solutions
     1 / nsols  # If this pick is a winner, there are no more guesses to make.
   else
@@ -1811,7 +1836,8 @@ function estimate_guesses_remaining_from_avg(guess::Vector{UInt8}, solutions::Ve
   # To estimate the number of remaining guesses n to win, we assume that we
   # maintain a constant ratio q of removed solutions after each guess.
   # We have s solutions currently, such that q^(n-1) = s. Thus n = 1 + log(s)÷log(q).
-  return 1 + (prob_sol * 0 + (1-prob_sol) * (log(nsols) / log(nsols / avg_remaining)))
+  expected_guesses = 1 + log(nsols) / log(nsols / avg_remaining)
+  return prob_sol * 1 + (1-prob_sol) * expected_guesses
 end
 
 # Compute the average remaining solutions for each guess.
