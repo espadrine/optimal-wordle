@@ -506,18 +506,18 @@ end
 # of explorations.
 
 mutable struct EstimatorStats <: AbstractEstimatorStats
-  # Number of actions that have done at least N-1 visits.
+  # Number of actions that have done at least I-1 visits (I = index).
   actions_with_visits::Vector{Int}
   # For each estimate count, we keep track of the mean bias of the estimator.
-  # In other words, the average difference between an estimation with N-1
-  # explorations and one with N, the latter being assumed as more precise.
+  # In other words, the average difference between an estimation with I-1
+  # explorations and one with I, the latter being assumed as more precise.
   visit_bias::Vector{Float64}
   # The overall bias from one estimate count, to the latest estimate.
   bias::Vector{Float64}
   # Variance of the difference between the debiased estimate after the Nth visit
-  # and the N-1 visit, times the number of samples. To allow streaming computation.
+  # and the I-1 visit, times the number of samples. To allow streaming computation.
   debiased_delta_variance_t::Vector{Float64}
-  # The variance of the debiased estimator after N-1 visits.
+  # The variance of the debiased estimator after I-1 visits.
   # It represents the uncertainty of its value,
   # thus works like a mean squared error compared to the true action value.
   debiased_variance::Vector{Float64}
@@ -526,6 +526,10 @@ mutable struct EstimatorStats <: AbstractEstimatorStats
 end
 
 EstimatorStats() = EstimatorStats([], [], [], [], [], nothing)
+
+function num_actions_with_at_least(s::EstimatorStats, v::Int)::Int
+  return s.actions_with_visits[v+1]
+end
 
 function Base.show(io::IO, stats::EstimatorStats)
   println(io, "visits\tactions_with_visits\tvisit_bias\tbias\tdebiased_delta_variance_t\tdebiased_variance")
@@ -765,7 +769,7 @@ end
 function update_tree_visit_bias!(choice::Choice, old_action_value::Float64, new_action_value::Float64)
   visit_bias = choice.tree.estimator_stats.visit_bias
   v = choice.visits
-  action_count = choice.tree.estimator_stats.actions_with_visits[v]
+  action_count = num_actions_with_at_least(choice.tree.estimator_stats, v)
   visit_bias[v] = streamed_mean(visit_bias[v], new_action_value - old_action_value, action_count)
 end
 
@@ -1024,9 +1028,14 @@ function best_exploratory_choice!(tree::Tree, solutions::Vector{Vector{UInt8}}, 
   #choice = choice_with_max_expected_exploratory_reward(tree, solutions, guesses)
 
   if isnothing(tree.previous_choice) && should_log(ACTION_SELECTION_LOG)
-    println("Selected ", choice, " (#", idx, ")")
-    println(tree)
+    println("Exploring ", choice, " (#", idx, ")")
+    if should_log(ACTION_SELECTION_TREE_LOG)
+      println(tree)
+    end
   end
+  #if tree_breadcrumb(tree) == "tarse ..x.x"
+  #  println(tree)
+  #end
   return choice, idx
 end
 
