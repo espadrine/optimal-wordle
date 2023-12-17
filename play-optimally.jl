@@ -828,6 +828,18 @@ function update_tree_bias_variance!(choice::Choice, old_debiased_estimate::Float
   for v = length(debiased_variance)-1:-1:1
     debiased_variance[v] += debiased_variance[v+1]
   end
+
+  # Often, the last few values have not yet seen a delta,
+  # but that does not mean that the variance is zero.
+  # So we replace zero variances with the latest nonzero one.
+  latest_nonzero = debiased_variance[1]
+  for v = 2:length(debiased_variance)
+    if debiased_variance[v] == 0.0
+      debiased_variance[v] = latest_nonzero
+    else
+      latest_nonzero = debiased_variance[v]
+    end
+  end
 end
 
 #function update_biases!(tree::Tree)
@@ -1013,10 +1025,10 @@ function best_exploratory_choice!(tree::Tree, solutions::Vector{Vector{UInt8}}, 
   # │   for best  ├──────────┬───────────┬─────────┤
   # │    choice   │ Thompson │ Hoeffding │ Laplace │
   # ├─────────────┼──────────┼───────────┼─────────┤
-  # │     <5.0000 │     1260 │      4578 │    6010 │
-  # │     <4.0000 │     1603 │      4684 │    6069 │
-  # │      3.5532 │     2437 │      7796 │    7642 │
-  # │      3.5526 │     2437 │      8078 │    7946 │
+  # │     <5.0000 │        6 │      4578 │    6010 │
+  # │     <4.0000 │       32 │      4684 │    6069 │
+  # │      3.5532 │      413 │      7796 │    7642 │
+  # │      3.5526 │      870 │      8078 │    7946 │
   # └─────────────┴──────────┴───────────┴─────────┘
 
   choice, idx = choice_from_thompson_sampling!(tree, solutions, guesses)
@@ -1033,7 +1045,11 @@ function best_exploratory_choice!(tree::Tree, solutions::Vector{Vector{UInt8}}, 
       println(tree)
     end
   end
-  #if tree_breadcrumb(tree) == "tarse ..x.x"
+
+  # The two trickiest optimal guesses, based on the last ones that are found,
+  # are tarse ....x pilon (2.9880 guesses left on average),
+  # and tarse ..x.x build (3.0305 guesses left on average).
+  #if tree_breadcrumb(tree) == "tarse ....x"
   #  println(tree)
   #end
   return choice, idx
@@ -1049,10 +1065,10 @@ function choice_from_thompson_sampling!(tree::Tree, solutions::Vector{Vector{UIn
   # │   for best  ├─────────────┬─────────────┬───────┤
   # │    choice   │ Probabilist │ Frequentist │  Fair │
   # ├─────────────┼─────────────┼─────────────┼───────┤
-  # │     <5.0000 │        9612 │        1260 │   111 │
-  # │     <4.0000 │       11190 │        1603 │   130 │
-  # │      3.5532 │       11953 │        2437 │   369 │
-  # │      3.5526 │       11953 │        2437 │   646 │
+  # │     <5.0000 │           6 │         188 │    30 │
+  # │     <4.0000 │          32 │         225 │    31 │
+  # │      3.5532 │         413 │        1171 │   513 │
+  # │      3.5526 │         870 │        2962 │>13850 │
   # └─────────────┴─────────────┴─────────────┴───────┘
 
   # Ablation study: (averaged action value estimate)
@@ -1061,14 +1077,14 @@ function choice_from_thompson_sampling!(tree::Tree, solutions::Vector{Vector{UIn
   # │   for best  ├─────────────┬─────────────┬───────┤
   # │    choice   │ Probabilist │ Frequentist │  Fair │
   # ├─────────────┼─────────────┼─────────────┼───────┤
-  # │     <5.0000 │         162 │         224 │   229 │
-  # │     <4.0000 │         197 │         261 │   240 │
-  # │      3.5532 │        5817 │         599 │ 14546 │
-  # │      3.5526 │             │             │       │
+  # │     <5.0000 │          81 │         109 │   185 │
+  # │     <4.0000 │          94 │         138 │   188 │
+  # │      3.5532 │        3543 │         811 │>20000 │
+  # │      3.5526 │      >17000 │       >3800 │       │
   # └─────────────┴─────────────┴─────────────┴───────┘
 
-  #return probabilist_thompson_sample(tree, solutions, guesses)
-  return frequentist_thompson_sample(tree, solutions, guesses)
+  return probabilist_thompson_sample(tree, solutions, guesses)
+  #return frequentist_thompson_sample(tree, solutions, guesses)
   #return fair_thompson_sample(tree, solutions, guesses)
 end
 
@@ -1878,16 +1894,24 @@ function Base.show(io::IO, tree::Tree)
   end
 end
 
-function choice_breadcrumb(choice::Choice)
-  choices = str_from_word(choice.guess)
-  while !isnothing(choice.tree.previous_choice)
-    choices = @sprintf("%s %s %s",
-      str_from_word(choice.tree.previous_choice.guess),
-      str_from_constraints(choice.tree.constraint),
-      choices)
-    choice = choice.tree.previous_choice
+function tree_breadcrumb(tree::Tree)::String
+  if isnothing(tree.previous_choice)
+    return "toplevel"
   end
-  return choices
+  breadcrumb = "$(str_from_word(tree.previous_choice.guess)) $(str_from_constraints(tree.constraint))"
+  tree = tree.previous_choice.tree
+  while !isnothing(tree.previous_choice)
+    breadcrumb = "$(str_from_word(tree.previous_choice.guess)) $(str_from_constraints(tree.constraint)) $(breadcrumb)"
+    tree = tree.previous_choice.tree
+  end
+  return breadcrumb
+end
+
+function choice_breadcrumb(choice::Choice)
+  if isnothing(choice.tree.previous_choice)
+    return str_from_word(choice.guess)
+  end
+  return "$(tree_breadcrumb(choice.tree)) $(str_from_word(choice.guess))"
 end
 
 function str_from_word(word::Vector{UInt8})::String
@@ -1989,8 +2013,9 @@ const STEP_LOG = 1
 const TIMINGS_LOG = 2
 const IMPROVEMENT_LOG = 4
 const ACTION_SELECTION_LOG = 8
-const DEPTH_LOG = 16
-const ACTIVATED_LOGS = STEP_LOG | TIMINGS_LOG | IMPROVEMENT_LOG
+const ACTION_SELECTION_TREE_LOG = 16
+const DEPTH_LOG = 32
+const ACTIVATED_LOGS = STEP_LOG | TIMINGS_LOG | IMPROVEMENT_LOG | ACTION_SELECTION_LOG
 function should_log(log_level::Int)::Bool
   return (ACTIVATED_LOGS & log_level) != 0
 end
