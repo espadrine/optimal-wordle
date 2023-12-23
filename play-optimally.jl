@@ -1020,20 +1020,21 @@ end
 # Pick the choice that is most valuable to explore.
 function best_exploratory_choice!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
   # Ablation study:
-  # ┌─────────────┬────────────────────────────────┐
-  # │ Lower bound │ Number of steps to find it     │
-  # │   for best  ├──────────┬───────────┬─────────┤
-  # │    choice   │ Thompson │ Hoeffding │ Laplace │
-  # ├─────────────┼──────────┼───────────┼─────────┤
-  # │     <5.0000 │        6 │      4578 │    6010 │
-  # │     <4.0000 │       32 │      4684 │    6069 │
-  # │      3.5532 │      413 │      7796 │    7642 │
-  # │      3.5526 │      870 │      8078 │    7946 │
-  # └─────────────┴──────────┴───────────┴─────────┘
+  # ┌─────────────┬────────────────────────────────────────┐
+  # │ Lower bound │ Number of steps to find the bound      │
+  # │   for best  ├──────────┬───────────┬─────────┬───────┤
+  # │    choice   │ Thompson │ Hoeffding │ Laplace │  PUCT │
+  # ├─────────────┼──────────┼───────────┼─────────┼───────┤
+  # │     <5.0000 │        6 │      4578 │    6010 │   378 │
+  # │     <4.0000 │       32 │      4684 │    6069 │   413 │
+  # │      3.5532 │      413 │      7796 │    7642 │  2864 │
+  # │      3.5526 │      870 │      8078 │    7946 │ 20539 │
+  # └─────────────┴──────────┴───────────┴─────────┴───────┘
 
   choice, idx = choice_from_thompson_sampling!(tree, solutions, guesses)
   #choice, idx = choice_from_ucb_hoeffding(tree, solutions, guesses)
   #choice, idx = choice_from_ucb_laplace(tree, solutions, guesses)
+  #choice, idx = choice_from_puct(tree, solutions, guesses)
 
   # Using exploratory reward yields too much sensitivity to
   # optimal choices incorrectly assessed as unimprovable.
@@ -1132,9 +1133,11 @@ function sample_action_value(choice::Choice)::Float64
   # │             ├──────────┬────────────┤
   # │             │ Gaussian │   Gumbel   │
   # ├─────────────┼──────────┼────────────┤
-  # │      3.5535 │      752 │       2864 │
-  # │      3.5532 │     1744 │       5040 │
-  # │      3.5529 │     8336 │        OOM │
+  # │     <4      │       32 │         35 │
+  # │     <3.6    │      113 │        307 │
+  # │     <3.56   │      138 │        682 │
+  # │     <3.553  │      523 │       1891 │
+  # │      3.5526 │      870 │      10560 │
   # └─────────────┴──────────┴────────────┘
   return rand(Normal(mode, sqrt(variance)))
   #scale = sqrt(variance * (6/pi^2))
@@ -1261,6 +1264,33 @@ function choice_from_ucb_laplace(tree::Tree, solutions::Vector{Vector{UInt8}}, g
   return best_choice, best_idx
 end
 
+function choice_from_puct(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
+  sum_exp_value_estimates = 0.0
+  for choice in tree.choices
+    sum_exp_value_estimates += exp(choice.value.estimate)
+  end
+
+  best_idx = 1
+  best_choice = tree.choices[best_idx]
+  highest_bound = -Inf
+  for (i, choice) in enumerate(tree.choices)
+    bound = action_value_upper_bound_puct(choice, sum_exp_value_estimates)
+    if isnothing(tree.previous_choice) && should_log(ACTION_SELECTION_LOG)
+      println("Studying bound=", bound, " for ", choice)
+    end
+    if bound > highest_bound
+      best_choice = choice
+      best_idx = i
+      highest_bound = bound
+    end
+  end
+  # If we pick the newest choice, we uncache a choice.
+  if best_choice == tree.newest_choice
+    add_choice_from_best_uncached_action!(tree, guesses, solutions)
+  end
+  return best_choice, best_idx
+end
+
 function action_value_upper_bound_hoeffding(choice::Choice)::Float64
   # Hoeffding’s inequality states that, for a sum of n indpendent random variables
   # ΣQ with L≤Qi≤U, Pr(ΣQ-𝔼[ΣQ]≥Δ) ≤ exp(-2Δ²÷(Σ(U-L)²))
@@ -1291,6 +1321,26 @@ function action_value_upper_bound_laplace(choice::Choice)::Float64
   return (action_value(choice) * choice.visits + action_value(choice) + delta) / (choice.visits+1)
 end
 
+function action_value_upper_bound_puct(choice::Choice, sum_exp_value_estimates::Float64)::Float64
+  coeff = 1.0
+  # We set the policy as the softmax of the initial action value estimate.
+  policy = exp(choice.value.estimate) / sum_exp_value_estimates
+  sum_visits = choice.tree.visits
+  # The p_{UCT} formula is described in the AlphaGo series,
+  # and while it references the Rosin 2011 paper,
+  # it is widely assumed to be handcrafted with no mathematical proof
+  # (cf. https://arxiv.org/pdf/2007.12509.pdf).
+  # Its form varies depending on which paper you read in the AlphaGo series:
+  # we use the original AlphaGo formula here:
+  # https://www.rose-hulman.edu/class/cs/csse413/schedule/day16/MasteringTheGameofGo.pdf
+  # AlphaGo Zero has the same formula but does not define its coefficient:
+  # https://discovery.ucl.ac.uk/id/eprint/10045895/1/agz_unformatted_nature.pdf
+  # AlphaZero adds 1 to its sum_visits: https://openreview.net/pdf?id=bERaNdoegnO
+  # MuZero goes back to the original formula
+  # but adds a visit-dependent term to the coefficient:
+  # https://arxiv.org/pdf/1911.08265.pdf
+  return action_value(choice) + coeff * policy * sqrt(sum_visits) / (1 + choice.visits)
+end
 
 # Return the choice (and its index in the cache) that will produce the highest
 # expected exploratory reward if explored.
@@ -1803,12 +1853,21 @@ end
 
 function estimate_action_value(guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}})::Float64
   # Ablation study:
-  # Empirically, the entropic estimator is worse,
-  # causing the untested action to be selected very often,
-  # even after thousands of iterations.
-  # However, after a while, confidence becomes reasonable,
-  # and it finds the optimal choice after 11953 steps,
-  # while the average estimator gets stuck on 3.5532 after 50K steps.
+  # ┌─────────────┬────────────────────┐
+  # │ Lower bound │ Number of steps    │
+  # │   for best  ├──────────┬─────────┤
+  # │    choice   │ Entropic │ Average │
+  # ├─────────────┼──────────┼─────────┤
+  # │     <5.0000 │        6 │      81 │
+  # │     <4.0000 │       32 │      94 │
+  # │      3.5532 │      413 │    3543 │
+  # │      3.5526 │      870 │  >17000 │
+  # └─────────────┴──────────┴─────────┘
+  # Empirically, the entropic estimator is further away from the true value,
+  # but its relative accuracy (between two actions) is better.
+  # As a result, after a while, the variance becomes reasonable,
+  # and it finds the optimal choice,
+  # while the average estimator gets stuck on 3.5529.
   return -estimate_guesses_remaining_from_entropy(guess, solutions)
   #return -estimate_guesses_remaining_from_avg(guess, solutions)
 end
