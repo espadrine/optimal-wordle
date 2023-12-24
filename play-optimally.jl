@@ -433,7 +433,7 @@ function Choice(tree::Tree, guess::Vector{UInt8}, solutions::Vector{Vector{UInt8
   #prob_improvement = 1
   #exploratory_reward = 1
   visits = 0
-  last_visit = -1
+  last_visit = tree.visits
   #visits_with_improvement = 0
   #reward_estimator = Estimator(tree.estimator_stats)
   #add_estimate!(reward_estimator, value_estimate)
@@ -1025,10 +1025,10 @@ function best_exploratory_choice!(tree::Tree, solutions::Vector{Vector{UInt8}}, 
   # │   for best  ├──────────┬───────────┬─────────┬───────┤
   # │    choice   │ Thompson │ Hoeffding │ Laplace │  PUCT │
   # ├─────────────┼──────────┼───────────┼─────────┼───────┤
-  # │     <5.0000 │        6 │      4578 │    6010 │   378 │
-  # │     <4.0000 │       32 │      4684 │    6069 │   413 │
-  # │      3.5532 │      413 │      7796 │    7642 │  2864 │
-  # │      3.5526 │      870 │      8078 │    7946 │ 20539 │
+  # │     <5.0000 │        6 │       205 │     280 │   378 │
+  # │     <4.0000 │       32 │       376 │     284 │   413 │
+  # │      3.5532 │      413 │      6849 │    2271 │  2864 │
+  # │      3.5526 │      870 │     22954 │   17735 │ 20539 │
   # └─────────────┴──────────┴───────────┴─────────┴───────┘
 
   choice, idx = choice_from_thompson_sampling!(tree, solutions, guesses)
@@ -1221,47 +1221,37 @@ function fair_thompson_sample(tree::Tree, solutions::Vector{Vector{UInt8}}, gues
 end
 
 function choice_from_ucb_hoeffding(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
-  best_idx = 1
-  best_choice = tree.choices[best_idx]
-  highest_bound = -Inf
-  for (i, choice) in enumerate(tree.choices)
-    bound = action_value_upper_bound_hoeffding(choice)
-    if isnothing(tree.previous_choice) && should_log(ACTION_SELECTION_LOG)
+  if isnothing(tree.previous_choice) && should_log(ACTION_SELECTION_LOG)
+    for choice in tree.choices
+      bound = action_value_upper_bound_hoeffding(choice)
       println("Studying bound=", bound, " for ", choice)
     end
-    if bound > highest_bound
-      best_choice = choice
-      best_idx = i
-      highest_bound = bound
-    end
   end
+
+  idx = argmax(map(action_value_upper_bound_hoeffding, tree.choices))
+  choice = tree.choices[idx]
   # If we pick the newest choice, we uncache a choice.
-  if best_choice == tree.newest_choice
+  if choice == tree.newest_choice
     add_choice_from_best_uncached_action!(tree, guesses, solutions)
   end
-  return best_choice, best_idx
+  return choice, idx
 end
 
 function choice_from_ucb_laplace(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
-  best_idx = 1
-  best_choice = tree.choices[best_idx]
-  highest_bound = -Inf
-  for (i, choice) in enumerate(tree.choices)
-    bound = action_value_upper_bound_laplace(choice)
-    if isnothing(tree.previous_choice) && should_log(ACTION_SELECTION_LOG)
+  if isnothing(tree.previous_choice) && should_log(ACTION_SELECTION_LOG)
+    for choice in tree.choices
+      bound = action_value_upper_bound_laplace(choice)
       println("Studying bound=", bound, " for ", choice)
     end
-    if bound > highest_bound
-      best_choice = choice
-      best_idx = i
-      highest_bound = bound
-    end
   end
+
+  idx = argmax(map(action_value_upper_bound_laplace, tree.choices))
+  choice = tree.choices[idx]
   # If we pick the newest choice, we uncache a choice.
-  if best_choice == tree.newest_choice
+  if choice == tree.newest_choice
     add_choice_from_best_uncached_action!(tree, guesses, solutions)
   end
-  return best_choice, best_idx
+  return choice, idx
 end
 
 function choice_from_puct(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
@@ -1270,25 +1260,20 @@ function choice_from_puct(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses:
     sum_exp_value_estimates += exp(choice.value.estimate)
   end
 
-  best_idx = 1
-  best_choice = tree.choices[best_idx]
-  highest_bound = -Inf
-  for (i, choice) in enumerate(tree.choices)
-    bound = action_value_upper_bound_puct(choice, sum_exp_value_estimates)
-    if isnothing(tree.previous_choice) && should_log(ACTION_SELECTION_LOG)
+  if isnothing(tree.previous_choice) && should_log(ACTION_SELECTION_LOG)
+    for choice in tree.choices
+      bound = action_value_upper_bound_puct(choice, sum_exp_value_estimates)
       println("Studying bound=", bound, " for ", choice)
     end
-    if bound > highest_bound
-      best_choice = choice
-      best_idx = i
-      highest_bound = bound
-    end
   end
+
+  idx = argmax(map(choice -> action_value_upper_bound_puct(choice, sum_exp_value_estimates), tree.choices))
+  choice = tree.choices[idx]
   # If we pick the newest choice, we uncache a choice.
-  if best_choice == tree.newest_choice
+  if choice == tree.newest_choice
     add_choice_from_best_uncached_action!(tree, guesses, solutions)
   end
-  return best_choice, best_idx
+  return choice, idx
 end
 
 function action_value_upper_bound_hoeffding(choice::Choice)::Float64
