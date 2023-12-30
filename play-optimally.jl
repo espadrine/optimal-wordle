@@ -1292,7 +1292,7 @@ function action_value_upper_bound_hoeffding(choice::Choice)::Float64
   # We can pick p = 0.05.
   p_value = 0.999
   upper_action_value = 0
-  lower_action_value = -5
+  lower_action_value = -6  # We lose the game after 6 failed guesses.
   factor = (upper_action_value - lower_action_value) * sqrt(-log(p_value)/2)
   return action_value(choice) + factor * (choice.visits+1)^-0.5
 end
