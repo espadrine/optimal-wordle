@@ -1066,10 +1066,10 @@ function choice_from_thompson_sampling!(tree::Tree, solutions::Vector{Vector{UIn
   # │   for best  ├─────────────┬─────────────┬───────┤
   # │    choice   │ Probabilist │ Frequentist │  Fair │
   # ├─────────────┼─────────────┼─────────────┼───────┤
-  # │     <5.0000 │           6 │         188 │    30 │
-  # │     <4.0000 │          32 │         225 │    31 │
-  # │      3.5532 │         413 │        1171 │   513 │
-  # │      3.5526 │         870 │        2962 │>13850 │
+  # │     <5.0000 │           6 │           6 │    30 │
+  # │     <4.0000 │          32 │          24 │    31 │
+  # │      3.5532 │         413 │         315 │   513 │
+  # │      3.5526 │         870 │        6586 │>13850 │
   # └─────────────┴─────────────┴─────────────┴───────┘
 
   # Ablation study: (averaged action value estimate)
@@ -1078,10 +1078,10 @@ function choice_from_thompson_sampling!(tree::Tree, solutions::Vector{Vector{UIn
   # │   for best  ├─────────────┬─────────────┬───────┤
   # │    choice   │ Probabilist │ Frequentist │  Fair │
   # ├─────────────┼─────────────┼─────────────┼───────┤
-  # │     <5.0000 │          81 │         109 │   185 │
-  # │     <4.0000 │          94 │         138 │   188 │
-  # │      3.5532 │        3543 │         811 │>20000 │
-  # │      3.5526 │      >17000 │       >3800 │       │
+  # │     <5.0000 │          81 │          76 │   185 │
+  # │     <4.0000 │          94 │          76 │   188 │
+  # │      3.5532 │        3543 │        3638 │>20000 │
+  # │      3.5526 │      >17000 │      >40000 │       │
   # └─────────────┴─────────────┴─────────────┴───────┘
 
   return probabilist_thompson_sample(tree, solutions, guesses)
@@ -1177,17 +1177,9 @@ end
 # Pick choices so that the frequency that they are picked at, matches their
 # probability of being the optimal action.
 function frequentist_thompson_sample(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
-  for (i, choice) in enumerate(tree.choices)
-    if choice.prob_optimal * (tree.visits - choice.last_visit) >= 1
-      # If we pick the newest choice, we uncache a choice.
-      if choice == tree.newest_choice
-        add_choice_from_best_uncached_action!(tree, guesses, solutions)
-      end
-      return choice, i
-    end
-  end
-  # If a choice has not been selected yet, we pick the newest one.
-  idx = length(tree.choices)
+  # We want to pick the one with the smallest next visit.
+  # The next visit is last_visit + frequency.
+  idx = argmin(map(choice -> choice.last_visit + 1/choice.prob_optimal, tree.choices))
   choice = tree.choices[idx]
   # If we pick the newest choice, we uncache a choice.
   if choice == tree.newest_choice
