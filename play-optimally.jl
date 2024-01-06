@@ -514,7 +514,7 @@ mutable struct EstimatorStats <: AbstractEstimatorStats
   visit_bias::Vector{Float64}
   # The overall bias from one estimate count, to the latest estimate.
   bias::Vector{Float64}
-  # Variance of the difference between the debiased estimate after the Nth visit
+  # Variance of the difference between the debiased estimate after the Ith visit
   # and the I-1 visit, times the number of samples. To allow streaming computation.
   debiased_delta_variance_t::Vector{Float64}
   # The variance of the debiased estimator after I-1 visits.
@@ -1031,14 +1031,19 @@ function best_exploratory_choice!(tree::Tree, solutions::Vector{Vector{UInt8}}, 
   # │      3.5526 │      870 │     22954 │   17735 │ 20539 │
   # └─────────────┴──────────┴───────────┴─────────┴───────┘
 
-  choice, idx = choice_from_thompson_sampling!(tree, solutions, guesses)
-  #choice, idx = choice_from_ucb_hoeffding(tree, solutions, guesses)
-  #choice, idx = choice_from_ucb_laplace(tree, solutions, guesses)
+  choice, idx = choice_from_thompson_sampling!(tree)
+  #choice, idx = choice_from_ucb_hoeffding(tree)
+  #choice, idx = choice_from_ucb_laplace(tree)
   #choice, idx = choice_from_puct(tree, solutions, guesses)
 
   # Using exploratory reward yields too much sensitivity to
   # optimal choices incorrectly assessed as unimprovable.
   #choice = choice_with_max_expected_exploratory_reward(tree, solutions, guesses)
+
+  # If we pick the newest choice, we uncache a choice.
+  if choice == tree.newest_choice
+    add_choice_from_best_uncached_action!(tree, guesses, solutions)
+  end
 
   if isnothing(tree.previous_choice) && should_log(ACTION_SELECTION_LOG)
     println("Exploring ", choice, " (#", idx, ")")
@@ -1057,7 +1062,7 @@ function best_exploratory_choice!(tree::Tree, solutions::Vector{Vector{UInt8}}, 
 end
 
 # Select a choice in proprotion to the probability that it is optimal.
-function choice_from_thompson_sampling!(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
+function choice_from_thompson_sampling!(tree::Tree)::Tuple{Choice, Int}
   update_prob_optimal!(tree)
 
   # Ablation study: (entropic action value estimate)
@@ -1081,12 +1086,12 @@ function choice_from_thompson_sampling!(tree::Tree, solutions::Vector{Vector{UIn
   # │     <5.0000 │          81 │          76 │   185 │
   # │     <4.0000 │          94 │          76 │   188 │
   # │      3.5532 │        3543 │        3638 │>20000 │
-  # │      3.5526 │      >17000 │      >40000 │       │
+  # │      3.5526 │      >17000 │      >65000 │       │
   # └─────────────┴─────────────┴─────────────┴───────┘
 
-  return probabilist_thompson_sample(tree, solutions, guesses)
-  #return frequentist_thompson_sample(tree, solutions, guesses)
-  #return fair_thompson_sample(tree, solutions, guesses)
+  return probabilist_thompson_sample(tree)
+  #return frequentist_thompson_sample(tree)
+  #return fair_thompson_sample(tree)
 end
 
 function update_prob_optimal!(tree::Tree)
@@ -1146,7 +1151,7 @@ end
 
 # Pick choices so that the frequency that they are picked at, matches their
 # probability of being the optimal action.
-function probabilist_thompson_sample(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
+function probabilist_thompson_sample(tree::Tree)::Tuple{Choice, Int}
   # The set of probabilities is a pie chart,
   # and on this pie wheel, we randomly run a pointer.
   rand_pointer = rand()
@@ -1157,34 +1162,22 @@ function probabilist_thompson_sample(tree::Tree, solutions::Vector{Vector{UInt8}
       if isnothing(tree.previous_choice) && should_log(ACTION_SELECTION_LOG)
         println("Selection rand_pointer=", rand_pointer)
       end
-      # If we pick the newest choice, we uncache a choice.
-      if choice == tree.newest_choice
-        add_choice_from_best_uncached_action!(tree, guesses, solutions)
-      end
       return choice, choice_idx
     end
   end
   # If a choice has not been selected yet, we pick the newest one.
   choice_idx = length(tree.choices)
   choice = tree.choices[choice_idx]
-  # If we pick the newest choice, we uncache a choice.
-  if choice == tree.newest_choice
-    add_choice_from_best_uncached_action!(tree, guesses, solutions)
-  end
   return choice, choice_idx
 end
 
 # Pick choices so that the frequency that they are picked at, matches their
 # probability of being the optimal action.
-function frequentist_thompson_sample(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
+function frequentist_thompson_sample(tree::Tree)::Tuple{Choice, Int}
   # We want to pick the one with the smallest next visit.
   # The next visit is last_visit + frequency.
   idx = argmin(map(choice -> choice.last_visit + 1/choice.prob_optimal, tree.choices))
   choice = tree.choices[idx]
-  # If we pick the newest choice, we uncache a choice.
-  if choice == tree.newest_choice
-    add_choice_from_best_uncached_action!(tree, guesses, solutions)
-  end
   return choice, idx
 end
 
@@ -1192,27 +1185,19 @@ end
 # a choice that has a 40% chance of being optimal
 # should be explored until 40% of all historical explorations is theirs.
 # We assume that the sum of prob_optimal across choices is 1.
-function fair_thompson_sample(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
+function fair_thompson_sample(tree::Tree)::Tuple{Choice, Int}
   for (i, choice) in enumerate(tree.choices)
     if choice.visits < tree.visits * choice.prob_optimal
-      # If we pick the newest choice, we uncache a choice.
-      if choice == tree.newest_choice
-        add_choice_from_best_uncached_action!(tree, guesses, solutions)
-      end
       return choice, i
     end
   end
   # If a choice has not been selected yet, we pick the newest one.
   idx = length(tree.choices)
   choice = tree.choices[idx]
-  # If we pick the newest choice, we uncache a choice.
-  if choice == tree.newest_choice
-    add_choice_from_best_uncached_action!(tree, guesses, solutions)
-  end
   return choice, idx
 end
 
-function choice_from_ucb_hoeffding(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
+function choice_from_ucb_hoeffding(tree::Tree)::Tuple{Choice, Int}
   if isnothing(tree.previous_choice) && should_log(ACTION_SELECTION_LOG)
     for choice in tree.choices
       bound = action_value_upper_bound_hoeffding(choice)
@@ -1222,14 +1207,10 @@ function choice_from_ucb_hoeffding(tree::Tree, solutions::Vector{Vector{UInt8}},
 
   idx = argmax(map(action_value_upper_bound_hoeffding, tree.choices))
   choice = tree.choices[idx]
-  # If we pick the newest choice, we uncache a choice.
-  if choice == tree.newest_choice
-    add_choice_from_best_uncached_action!(tree, guesses, solutions)
-  end
   return choice, idx
 end
 
-function choice_from_ucb_laplace(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
+function choice_from_ucb_laplace(tree::Tree)::Tuple{Choice, Int}
   if isnothing(tree.previous_choice) && should_log(ACTION_SELECTION_LOG)
     for choice in tree.choices
       bound = action_value_upper_bound_laplace(choice)
@@ -1239,14 +1220,10 @@ function choice_from_ucb_laplace(tree::Tree, solutions::Vector{Vector{UInt8}}, g
 
   idx = argmax(map(action_value_upper_bound_laplace, tree.choices))
   choice = tree.choices[idx]
-  # If we pick the newest choice, we uncache a choice.
-  if choice == tree.newest_choice
-    add_choice_from_best_uncached_action!(tree, guesses, solutions)
-  end
   return choice, idx
 end
 
-function choice_from_puct(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses::Vector{Vector{UInt8}})::Tuple{Choice, Int}
+function choice_from_puct(tree::Tree)::Tuple{Choice, Int}
   sum_exp_value_estimates = 0.0
   for choice in tree.choices
     sum_exp_value_estimates += exp(choice.value.estimate)
@@ -1261,10 +1238,6 @@ function choice_from_puct(tree::Tree, solutions::Vector{Vector{UInt8}}, guesses:
 
   idx = argmax(map(choice -> action_value_upper_bound_puct(choice, sum_exp_value_estimates), tree.choices))
   choice = tree.choices[idx]
-  # If we pick the newest choice, we uncache a choice.
-  if choice == tree.newest_choice
-    add_choice_from_best_uncached_action!(tree, guesses, solutions)
-  end
   return choice, idx
 end
 
