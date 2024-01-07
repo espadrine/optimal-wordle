@@ -52,8 +52,20 @@ function main()
     println("Insert the results (o = letter at right spot, x = wrong spot, . = not in the word): ")
     constraint_template = readline(stdin)
     constraint = parse_constraints(constraint_template)
-    # FIXME: build subtree when it does not exist.
-    tree = tree.choices[findfirst(c -> c.guess == guess, tree.choices)].constraints[constraint + 1]
+    # Move the state to the chosen guess.
+    guess_idx = findfirst(c -> c.guess == guess, tree.choices)
+    if isnothing(guess_idx)
+      add_choice(tree, guess, remaining_solutions)
+      guess_idx = lastindex(tree.choices)
+    end
+    choice = tree.choices[guess_idx]
+    if isnothing(choice.constraints)
+      choice.constraints = Vector{Union{Tree, Nothing}}(nothing, 243)
+    end
+    if isnothing(choice.constraints[constraint + 1])
+      choice.constraints[constraint + 1] = Tree(allowed_guesses, remaining_solutions, choice, constraint)
+    end
+    tree = choice.constraints[constraint + 1]
     remaining_solutions = filter_solutions_by_constraint(remaining_solutions, guess, constraint)
     println("Remaining words: ", join(map(s -> str_from_word(s), remaining_solutions), ", "))
   end
@@ -1645,14 +1657,28 @@ end
 function add_choice_from_best_uncached_action!(
            tree::Tree, guesses::Vector{Vector{UInt8}},
            solutions::Vector{Vector{UInt8}})::Union{Choice, Nothing}
-  action_estimates = uncached_action_estimates(tree, guesses, solutions)
+  action_estimates = if islocked(tree.lock)
+    unlock(tree.lock)
+    action_estimates = uncached_action_estimates(tree, guesses, solutions)
+    lock(tree.lock)
+    action_estimates
+  else
+    uncached_action_estimates(tree, guesses, solutions)
+  end
   best_action_estimate, _ = find_best_action_estimate(action_estimates)
   if isnothing(best_action_estimate)
     return nothing
   end
+  return add_choice(tree::Tree, best_action_estimate.action, best_action_estimate.value, solutions::Vector{Vector{UInt8}})
+end
 
-  choice = Choice(tree, best_action_estimate.action, solutions,
-    best_action_estimate.value)
+function add_choice(tree::Tree, guess::Vector{UInt8}, solutions::Vector{Vector{UInt8}})::Choice
+  action_value = estimate_action_value(guess, solutions)
+  return add_choice(tree, guess, action_value, solutions)
+end
+
+function add_choice(tree::Tree, guess::Vector{UInt8}, action_value::Float64, solutions::Vector{Vector{UInt8}})::Choice
+  choice = Choice(tree, guess, solutions, action_value)
   if length(tree.choices) == 0
     tree.best_choice = choice
     tree.best_choice_lower_bound = choice
