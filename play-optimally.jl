@@ -1135,10 +1135,6 @@ end
 function sample_action_value(choice::Choice)::Float64
   mode = action_value(choice)
   variance = action_value_variance(choice)
-  if variance == 0
-    #println("Warning: sample_action_value: zero variance for choice ", choice)
-    return mode
-  end
   # Ablation study: a Gaussian increases the optimal prob of the top choice
   # yet it ensures the next top choices have more visits as well
   # (despite them having a lower optimal proability).
@@ -1156,9 +1152,23 @@ function sample_action_value(choice::Choice)::Float64
   # │     <3.553  │      523 │       1891 │
   # │      3.5526 │      870 │      10560 │
   # └─────────────┴──────────┴────────────┘
+  return sample_normal(mode, variance)
+  #return sample_gumbel(mode, variance)
+end
+
+function sample_normal(mode::Float64, variance::Float64)::Float64
+  if variance == 0
+    return mode
+  end
   return rand(Normal(mode, sqrt(variance)))
-  #scale = sqrt(variance * (6/pi^2))
-  #return rand(Gumbel(mode, scale))
+end
+
+function sample_gumbel(mode::Float64, variance::Float64)::Float64
+  if variance == 0
+    return mode
+  end
+  scale = sqrt(variance * (6/pi^2))
+  return rand(Gumbel(mode, scale))
 end
 
 # Pick choices so that the frequency that they are picked at, matches their
