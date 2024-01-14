@@ -19,13 +19,13 @@ function main()
     if length(remaining_solutions) == 3158
       @time while tree.best_choice.best_lower_bound < -3.5526
         add_time(computation_timers.improve, @elapsed begin
-          Threads.@threads for i = 1:Threads.nthreads()
+          Threads.@threads for _ = 1:Threads.nthreads()
             improve!(tree, remaining_solutions, allowed_guesses)
           end
         end)
         step += Threads.nthreads()
 
-        choice = tree.best_choice
+        choice = tree.best_choice_lower_bound
         if should_log(TIMINGS_LOG)
           println("Times: ", string(computation_timers))
         end
