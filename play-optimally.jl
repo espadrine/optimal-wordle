@@ -1046,7 +1046,7 @@ function best_exploratory_choice!(tree::Tree, solutions::Vector{Vector{UInt8}}, 
   choice, idx = choice_from_thompson_sampling!(tree)
   #choice, idx = choice_from_ucb_hoeffding(tree)
   #choice, idx = choice_from_ucb_laplace(tree)
-  #choice, idx = choice_from_puct(tree, solutions, guesses)
+  #choice, idx = choice_from_puct(tree)
 
   # Using exploratory reward yields too much sensitivity to
   # optimal choices incorrectly assessed as unimprovable.
